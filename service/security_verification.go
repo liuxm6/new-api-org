@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
 	"github.com/QuantumNous/new-api/setting/system_setting"
+	"github.com/QuantumNous/new-api/types"
 	"gorm.io/gorm"
 )
 
@@ -259,6 +260,13 @@ func BindVerificationOperation(operation VerificationOperation) (VerificationBin
 			return VerificationBinding{}, ErrVerificationContextInvalid
 		}
 		normalized = context
+	case types.SensitiveManagementKeyCreate, types.SensitiveManagementKeyRevoke, types.SensitiveOwnershipTransfer,
+		types.SensitiveOrgDelete, types.SensitiveSSOUpdate, types.SensitiveIdentityLink, types.SensitiveCreditTransfer:
+		context, ok := normalizeOrgSensitiveContext(fields, operation.Context)
+		if !ok {
+			return VerificationBinding{}, ErrVerificationContextInvalid
+		}
+		normalized = context
 	case VerificationScopePasskeyRegister, VerificationScopePasskeyDelete, VerificationScopeTwoFASetup,
 		VerificationScopeTwoFADisable, VerificationScopeTwoFABackupCodes,
 		VerificationScopePasswordSet, VerificationScopePasswordChange, VerificationScopeAccountDelete:
@@ -330,7 +338,9 @@ func securityVerificationPolicy(scope string, state model.UserVerificationState)
 		VerificationScopePasswordSet, VerificationScopePasswordChange, VerificationScopeAccountDelete,
 		VerificationScopeAdminUserCreate, VerificationScopeAdminUserUpdate, VerificationScopeAdminUserDelete,
 		VerificationScopeAdminUserManage, VerificationScopeAdminUserPasskeyReset,
-		VerificationScopeAdminUserTwoFADisable, VerificationScopeAdminUserBindingClear:
+		VerificationScopeAdminUserTwoFADisable, VerificationScopeAdminUserBindingClear,
+		types.SensitiveManagementKeyCreate, types.SensitiveManagementKeyRevoke, types.SensitiveOwnershipTransfer,
+		types.SensitiveOrgDelete, types.SensitiveSSOUpdate, types.SensitiveIdentityLink, types.SensitiveCreditTransfer:
 		if scope == VerificationScopeAccountDelete && state.Role == common.RoleRootUser {
 			return nil, ErrVerificationForbidden
 		}
@@ -375,6 +385,13 @@ func GetVerificationRequirements(identity AuthIdentity, scope string) (*Verifica
 	if state.Status != common.UserStatusEnabled || state.AuthVersion != identity.UserAuthVersion {
 		return nil, ErrAuthTokenInvalid
 	}
+	authScope, orgID, providerID, err := sessionAuthScope(identity)
+	if err != nil {
+		return nil, err
+	}
+	if authScope == types.AuthScopeOrg {
+		return orgSessionRequirements(identity, scope, orgID, providerID)
+	}
 	if scope == VerificationScopeChannelKeyRead && state.Role != common.RoleRootUser {
 		return nil, ErrVerificationForbidden
 	}
@@ -395,7 +412,9 @@ func GetVerificationRequirements(identity AuthIdentity, scope string) (*Verifica
 			case VerificationScopeAccountBind, VerificationScopeAccountUnbind, VerificationScopePasswordSet, VerificationScopePasswordChange, VerificationScopeAccountDelete,
 				VerificationScopeAdminUserCreate, VerificationScopeAdminUserUpdate, VerificationScopeAdminUserDelete,
 				VerificationScopeAdminUserManage, VerificationScopeAdminUserPasskeyReset,
-				VerificationScopeAdminUserTwoFADisable, VerificationScopeAdminUserBindingClear:
+				VerificationScopeAdminUserTwoFADisable, VerificationScopeAdminUserBindingClear,
+				types.SensitiveManagementKeyCreate, types.SensitiveManagementKeyRevoke, types.SensitiveOwnershipTransfer,
+				types.SensitiveOrgDelete, types.SensitiveSSOUpdate, types.SensitiveIdentityLink, types.SensitiveCreditTransfer:
 				methods[i].Available, methods[i].Reason = false, "Password authentication is disabled."
 			}
 		}

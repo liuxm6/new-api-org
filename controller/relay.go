@@ -190,6 +190,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = billingErr
 			break
 		}
+		// An organization attempt is checked against the channel just chosen and
+		// the final price, before anything is sent (design 4.2.3).
+		if billingErr := service.PrepareOrgAttemptBilling(c, relayInfo); billingErr != nil {
+			newAPIError = billingErr
+			break
+		}
 
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
@@ -674,6 +680,7 @@ func executeTaskSubmissionWith(
 		TieredSnapshot:  relayInfo.TieredBillingSnapshot,
 	}
 	task.Quota = result.Quota
+	task.BillingOperationId = service.OrgBillingOperationID(relayInfo)
 	task.Data = result.TaskData
 	if len(result.PluginState) > 0 {
 		task.PrivateData.PluginState = result.PluginState
@@ -734,6 +741,7 @@ func executeTaskSubmissionWith(
 				return nil, taskErr
 			}
 			service.LogTaskConsumption(c, relayInfo, task)
+			service.CloseOrgTaskOperation(c, task)
 		}
 		return nil, taskErr
 	}
@@ -747,6 +755,9 @@ func executeTaskSubmissionWith(
 		taskErr = service.TaskErrorWrapperLocal(errors.New("failed to settle task billing"), "task_billing_settlement_failed", http.StatusInternalServerError)
 		diagnostics.failed("settle", "billing_error", taskErr, true)
 		return nil, taskErr
+	}
+	if task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure {
+		service.CloseOrgTaskOperation(c, task)
 	}
 	perfmetrics.RecordImmediateTaskResult(relayInfo, result.Immediate)
 	if task.Status != model.TaskStatusFailure {

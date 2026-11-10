@@ -272,7 +272,8 @@ func GetTokenUsage(c *gin.Context) {
 		"expires_at":           expiredAt,
 	}
 	// 用户额度只在令牌允许时返回；IP 白名单已由 TokenAuthReadOnly 检查。
-	if token.AllowUserQuotaQuery {
+	// An organization key never reports the shared wallet, whatever its flag says.
+	if token.AllowUserQuotaQuery && token.OrgId == 0 {
 		userQuota, err := model.GetUserQuota(token.UserId, false)
 		var userUsedQuota int
 		if err == nil {

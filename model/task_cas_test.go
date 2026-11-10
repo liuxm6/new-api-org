@@ -63,6 +63,11 @@ func TestMain(m *testing.M) {
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
+	// Account disable and delete revoke organization access in the same
+	// transaction, so those paths need the organization tables, as at startup.
+	if err := migrateOrgTables(); err != nil {
+		panic("failed to migrate organization tables: " + err.Error())
+	}
 
 	os.Exit(m.Run())
 }

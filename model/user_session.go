@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/types"
 
 	"gorm.io/gorm"
 )
@@ -18,7 +19,7 @@ const (
 	UserSessionStatusRevoking = "revoking"
 	UserSessionStatusRevoked  = "revoked"
 
-	userSessionCacheSchema      = 1
+	userSessionCacheSchema      = 2
 	userSessionListLimit        = 100
 	userSessionRevokeBatchSize  = 500
 	userSessionCleanupScanLimit = 1000
@@ -56,6 +57,11 @@ type UserSession struct {
 	ExpiresAt           int64  `json:"expires_at" gorm:"type:bigint;not null;column:expires_at;index:idx_user_sessions_user_status_expiry,priority:3;index:idx_user_sessions_expires_at"`
 	RevokedAt           int64  `json:"revoked_at,omitempty" gorm:"type:bigint;not null;default:0;column:revoked_at;index:idx_user_sessions_status_revoked,priority:2"`
 	RevokedReason       string `json:"revoked_reason,omitempty" gorm:"type:varchar(64);column:revoked_reason"`
+	// AuthScope limits what the session may reach. Sessions that predate
+	// organizations are global; a tenant IdP login is org-scoped and never widens.
+	AuthScope  string `json:"auth_scope" gorm:"type:varchar(8);default:'global'"`
+	OrgID      int    `json:"org_id" gorm:"default:0"`
+	ProviderID int    `json:"provider_id" gorm:"default:0"`
 }
 
 func (UserSession) TableName() string {
@@ -81,9 +87,14 @@ type userSessionCacheEntry struct {
 	ExpiresAt       int64
 	RevokedAt       int64
 	RevokedReason   string
-	CacheSchema     int
-	CacheExpiresAt  int64
-	CacheMAC        string `json:"-"`
+	// AuthScope, OrgID and ProviderID are part of the cached snapshot so a cache
+	// hit can never turn an org-restricted session into a global one.
+	AuthScope      string
+	OrgID          int
+	ProviderID     int
+	CacheSchema    int
+	CacheExpiresAt int64
+	CacheMAC       string `json:"-"`
 }
 
 func (session *UserSession) cacheEntry() *userSessionCacheEntry {
@@ -101,6 +112,9 @@ func (session *UserSession) cacheEntry() *userSessionCacheEntry {
 		ExpiresAt:       session.ExpiresAt,
 		RevokedAt:       session.RevokedAt,
 		RevokedReason:   session.RevokedReason,
+		AuthScope:       session.EffectiveAuthScope(),
+		OrgID:           session.OrgID,
+		ProviderID:      session.ProviderID,
 		CacheSchema:     userSessionCacheSchema,
 	}
 }
@@ -120,7 +134,19 @@ func (entry *userSessionCacheEntry) session() *UserSession {
 		ExpiresAt:       entry.ExpiresAt,
 		RevokedAt:       entry.RevokedAt,
 		RevokedReason:   entry.RevokedReason,
+		AuthScope:       entry.AuthScope,
+		OrgID:           entry.OrgID,
+		ProviderID:      entry.ProviderID,
 	}
+}
+
+// EffectiveAuthScope returns the session scope, treating a blank value (rows
+// written before the column existed) as global.
+func (session *UserSession) EffectiveAuthScope() string {
+	if session.AuthScope == "" {
+		return types.AuthScopeGlobal
+	}
+	return session.AuthScope
 }
 
 func userSessionCacheKey(sid string) string {
@@ -153,6 +179,12 @@ func createUserSessionWithTx(tx *gorm.DB, session *UserSession) error {
 	}
 	if session.Status != UserSessionStatusActive || session.RevokedAt != 0 {
 		return ErrUserSessionInvalid
+	}
+	// Organization wallets never hold a session, whatever the sign-in method.
+	if billing, err := isBillingAccountByID(tx, session.UserID); err != nil {
+		return err
+	} else if billing {
+		return ErrBillingAccount
 	}
 	if session.LastActiveAt == 0 {
 		session.LastActiveAt = now
@@ -346,7 +378,8 @@ redis.call('HSET', KEYS[1],
   'LoginMethod', ARGV[6], 'IP', ARGV[7], 'UserAgent', ARGV[8],
   'CreatedAt', ARGV[9], 'LastActiveAt', ARGV[10], 'ExpiresAt', ARGV[11],
   'RevokedAt', ARGV[12], 'RevokedReason', ARGV[13], 'CacheSchema', ARGV[14],
-  'CacheExpiresAt', ARGV[16], 'CacheMAC', ARGV[17])
+  'CacheExpiresAt', ARGV[16], 'CacheMAC', ARGV[17],
+  'AuthScope', ARGV[18], 'OrgID', ARGV[19], 'ProviderID', ARGV[20])
 if ARGV[5] == 'active' then
   redis.call('PEXPIREAT', KEYS[1], ARGV[15])
 else
@@ -357,7 +390,7 @@ return 1`
 		entry.SID, entry.UserID, entry.Version, entry.UserAuthVersion, entry.Status,
 		entry.LoginMethod, entry.IP, entry.UserAgent, entry.CreatedAt, entry.LastActiveAt,
 		entry.ExpiresAt, entry.RevokedAt, entry.RevokedReason, entry.CacheSchema, redisExpiration,
-		entry.CacheExpiresAt, mac,
+		entry.CacheExpiresAt, mac, entry.AuthScope, entry.OrgID, entry.ProviderID,
 	).Int()
 	if err != nil {
 		return err

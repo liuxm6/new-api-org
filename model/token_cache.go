@@ -18,11 +18,28 @@ func (token Token) cacheMAC() (string, error) {
 	if token.AllowIps != nil && *token.AllowIps == "" {
 		token.AllowIps = nil
 	}
+	// Organization ownership fields are json:"-" on Token, so they are listed
+	// here explicitly. Without this a tampered or stale cache entry could change
+	// org_id and still verify. Entries written before these fields existed hash
+	// without them, fail verification and are reloaded from the database.
 	return authCacheMAC(key, struct {
 		Token          Token
 		AutoGroups     string
 		CacheExpiresAt int64
-	}{token, token.AutoGroups, token.CacheExpiresAt})
+		Org            struct {
+			OrgId             int
+			WorkspaceId       int
+			CreatedBy         int
+			OwnerType         string
+			AccessPrincipalId string
+		}
+	}{token, token.AutoGroups, token.CacheExpiresAt, struct {
+		OrgId             int
+		WorkspaceId       int
+		CreatedBy         int
+		OwnerType         string
+		AccessPrincipalId string
+	}{token.OrgId, token.WorkspaceId, token.CreatedBy, token.OwnerType, token.AccessPrincipalId}})
 }
 
 func getTokenCacheKey(key string) string {
@@ -109,6 +126,8 @@ redis.call('HSET', KEYS[1],
   'UnlimitedQuota', ARGV[8], 'ModelLimitsEnabled', ARGV[9], 'ModelLimits', ARGV[10],
   'AllowIps', ARGV[11], 'Group', ARGV[12], 'CrossGroupRetry', ARGV[13],
   'AutoGroups', ARGV[14], 'AllowUserQuotaQuery', ARGV[17],
+  'OrgId', ARGV[23], 'WorkspaceId', ARGV[24], 'CreatedBy', ARGV[25],
+  'OwnerType', ARGV[26], 'AccessPrincipalId', ARGV[27],
   'CacheExpiresAt', ARGV[19], 'CacheMAC', ARGV[20])
 for _, counter in ipairs({{'AccessedTime', ARGV[6]}, {'RemainQuota', ARGV[15]}, {'UsedQuota', ARGV[16]}}) do
   if not string.match(redis.call('HGET', KEYS[1], counter[1]) or '', '^-?%d+$') then
@@ -132,6 +151,7 @@ return 1`
 		strconv.FormatBool(token.AllowUserQuotaQuery),
 		tokenCacheTTLSeconds(),
 		token.CacheExpiresAt, mac, strconv.FormatBool(repair), existing.CacheMAC,
+		token.OrgId, token.WorkspaceId, token.CreatedBy, token.OwnerType, token.AccessPrincipalId,
 	).Int()
 }
 

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+
+	"gorm.io/gorm"
 )
 
 type accessPolicyPayload struct {
@@ -62,6 +64,11 @@ type CustomOAuthProvider struct {
 	AccessPolicy        string `json:"access_policy" gorm:"type:text"`                 // JSON policy for access control based on user info
 	AccessDeniedMessage string `json:"access_denied_message" gorm:"type:varchar(512)"` // Custom error message template when access is denied
 
+	// OrgId binds a tenant IdP to one organization; zero is a platform provider.
+	// Once set, neither OrgId nor Issuer may be changed in place.
+	OrgId  int    `json:"org_id" gorm:"default:0;index"`
+	Issuer string `json:"issuer" gorm:"type:varchar(255);default:''"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -112,16 +119,53 @@ func CreateCustomOAuthProvider(provider *CustomOAuthProvider) error {
 	return DB.Create(provider).Error
 }
 
+// ErrOrgProviderImmutable is returned when an update would change the
+// organization or the issuer of a tenant IdP, or bind a platform provider to an
+// organization. Identities are keyed by (provider, issuer, subject), so moving
+// either would silently re-point every existing login.
+var ErrOrgProviderImmutable = errors.New("the organization and issuer of an identity provider cannot be changed")
+
+// ErrOrgProviderInUse is returned when a tenant IdP still has identities.
+var ErrOrgProviderInUse = errors.New("the identity provider still has linked identities")
+
 // UpdateCustomOAuthProvider updates an existing custom OAuth provider
 func UpdateCustomOAuthProvider(provider *CustomOAuthProvider) error {
+	return UpdateCustomOAuthProviderTx(DB, provider)
+}
+
+// CreateCustomOAuthProviderTx creates a provider inside the caller's transaction.
+func CreateCustomOAuthProviderTx(tx *gorm.DB, provider *CustomOAuthProvider) error {
 	if err := validateCustomOAuthProvider(provider); err != nil {
 		return err
 	}
-	return DB.Save(provider).Error
+	return tx.Create(provider).Error
+}
+
+// UpdateCustomOAuthProviderTx updates a provider inside the caller's
+// transaction, refusing any change of organization or of a tenant issuer.
+func UpdateCustomOAuthProviderTx(tx *gorm.DB, provider *CustomOAuthProvider) error {
+	if err := validateCustomOAuthProvider(provider); err != nil {
+		return err
+	}
+	var stored []CustomOAuthProvider
+	if err := tx.Select("id", "org_id", "issuer").Where("id = ?", provider.Id).Limit(1).Find(&stored).Error; err != nil {
+		return err
+	}
+	if len(stored) == 1 && (stored[0].OrgId != provider.OrgId || (stored[0].OrgId > 0 && stored[0].Issuer != provider.Issuer)) {
+		return ErrOrgProviderImmutable
+	}
+	return tx.Save(provider).Error
 }
 
 // DeleteCustomOAuthProvider deletes a custom OAuth provider by ID
 func DeleteCustomOAuthProvider(id int) error {
+	var identities int64
+	if err := DB.Model(&OrgIdentity{}).Where("provider_id = ?", id).Count(&identities).Error; err != nil {
+		return err
+	}
+	if identities > 0 {
+		return ErrOrgProviderInUse
+	}
 	// First, delete all user bindings for this provider
 	if err := DB.Where("provider_id = ?", id).Delete(&UserOAuthBinding{}).Error; err != nil {
 		return err
@@ -167,6 +211,17 @@ func validateCustomOAuthProvider(provider *CustomOAuthProvider) error {
 
 	if provider.ClientId == "" {
 		return errors.New("client ID is required")
+	}
+	if provider.OrgId > 0 {
+		// A tenant IdP is described by its issuer alone; endpoints come from
+		// discovery and are never stored (design section 8.1).
+		if !strings.HasPrefix(provider.Issuer, "https://") || provider.ClientSecret == "" {
+			return errors.New("a tenant identity provider needs an https issuer and a client secret")
+		}
+		if provider.Scopes == "" {
+			provider.Scopes = "openid profile email"
+		}
+		return nil
 	}
 	if provider.AuthorizationEndpoint == "" {
 		return errors.New("authorization endpoint is required")

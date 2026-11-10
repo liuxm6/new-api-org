@@ -45,6 +45,11 @@ func SetUpLogger(server *gin.Engine) {
 				// with ?key=.
 				path = param.Request.URL.Path
 			}
+			// An invitation token travels in the path of its accept URL; it is a
+			// bearer credential and must not reach access logs.
+			if strings.HasPrefix(path, "/api/invites/") {
+				path = "/api/invites/:token/accept"
+			}
 			return fmt.Sprintf("[GIN] %s | %s | %s | %3d | %13v | %15s | %7s %s\n",
 				param.TimeStamp.Format("2006/01/02 - 15:04:05"),
 				tag,

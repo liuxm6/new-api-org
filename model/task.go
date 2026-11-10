@@ -69,6 +69,15 @@ type Task struct {
 	// 禁止返回给用户，内部可能包含key等隐私信息
 	PrivateData TaskPrivateData `json:"-" gorm:"column:private_data;type:json"`
 	Data        json.RawMessage `json:"data" gorm:"type:json"`
+
+	// Organization attribution, persisted at submit time so polling, refunds and
+	// reads never infer the owner from the current key.
+	OrgId              int    `json:"-" gorm:"default:0;index:idx_task_org_ws,priority:1"`
+	WorkspaceId        int    `json:"-" gorm:"default:0;index:idx_task_org_ws,priority:2"`
+	ActorUserId        int    `json:"-" gorm:"default:0"`
+	OwnerType          string `json:"-" gorm:"type:varchar(16);default:''"`
+	AccessPrincipalId  string `json:"-" gorm:"type:varchar(64);default:''"`
+	BillingOperationId string `json:"-" gorm:"type:varchar(64);default:'';index"`
 }
 
 func (t *Task) SetData(data any) {
@@ -277,6 +286,9 @@ func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) 
 		Properties:  properties,
 		PrivateData: privateData,
 	}
+	// The owner snapshot comes from the subject TokenAuth proved for this
+	// request, so polling, refunds and reads never infer the owner from a key.
+	t.ApplyOrgSubject(relayInfo.OrgSubject)
 	return t
 }
 
@@ -284,8 +296,8 @@ func TaskGetAllUserTask(userId int, startIdx int, num int, queryParams SyncTaskQ
 	var tasks []*Task
 	var err error
 
-	// 初始化查询构建器
-	query := DB.Where("user_id = ?", userId)
+	// 初始化查询构建器。个人任务列表：组织任务（org_id>0）只经对象授权入口读取。
+	query := DB.Where("user_id = ? AND org_id = 0", userId)
 
 	if queryParams.TaskID != "" {
 		query = query.Where("task_id = ?", queryParams.TaskID)
@@ -322,8 +334,8 @@ func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) []*
 	var tasks []*Task
 	var err error
 
-	// 初始化查询构建器
-	query := DB
+	// 初始化查询构建器。平台任务总表只含个人任务；跨组织读取走带 platform.access 审计的独立入口。
+	query := DB.Where("org_id = 0")
 
 	// 添加过滤条件
 	if queryParams.ChannelID != "" {
@@ -409,7 +421,7 @@ func GetByOnlyTaskId(taskId string) (*Task, bool, error) {
 	}
 	var task *Task
 	var err error
-	err = DB.Where("task_id = ?", taskId).First(&task).Error
+	err = DB.Where("task_id = ? AND org_id = 0", taskId).First(&task).Error
 	exist, err := RecordExist(err)
 	if err != nil {
 		return nil, false, err
@@ -426,7 +438,7 @@ func GetUniqueByOnlyTaskId(taskId string) (*Task, bool, error) {
 		return nil, false, nil
 	}
 	var tasks []*Task
-	if err := DB.Where("task_id = ?", taskId).Order("id").Limit(2).Find(&tasks).Error; err != nil {
+	if err := DB.Where("task_id = ? AND org_id = 0", taskId).Order("id").Limit(2).Find(&tasks).Error; err != nil {
 		return nil, false, err
 	}
 	if len(tasks) != 1 {
@@ -441,7 +453,7 @@ func GetByTaskId(userId int, taskId string) (*Task, bool, error) {
 	}
 	var task *Task
 	var err error
-	err = DB.Where("user_id = ? and task_id = ?", userId, taskId).
+	err = DB.Where("user_id = ? and task_id = ? and org_id = 0", userId, taskId).
 		First(&task).Error
 	exist, err := RecordExist(err)
 	if err != nil {
@@ -456,7 +468,7 @@ func GetByTaskIdsForPlatforms(userID int, platforms []constant.TaskPlatform, tas
 	}
 	var tasks []*Task
 	err := DB.
-		Where("user_id = ? AND platform IN ? AND task_id IN ?", userID, platforms, taskIDs).
+		Where("user_id = ? AND org_id = 0 AND platform IN ? AND task_id IN ?", userID, platforms, taskIDs).
 		Find(&tasks).Error
 	if err != nil {
 		return nil, err
@@ -473,7 +485,7 @@ func GetTaskForProtocolObservation(ctx context.Context, userID int, platform con
 	}
 	var task Task
 	err := DB.WithContext(ctx).
-		Where("user_id = ? AND platform = ? AND task_id = ?", userID, platform, taskID).
+		Where("user_id = ? AND org_id = 0 AND platform = ? AND task_id = ?", userID, platform, taskID).
 		First(&task).Error
 	exists, err := RecordExist(err)
 	if err != nil || !exists {
@@ -584,7 +596,7 @@ type TaskQuotaUsage struct {
 // TaskCountAllTasks returns total tasks that match the given query params (admin usage)
 func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
 	var total int64
-	query := DB.Model(&Task{})
+	query := DB.Model(&Task{}).Where("org_id = 0")
 	if queryParams.ChannelID != "" {
 		query = query.Where("channel_id = ?", queryParams.ChannelID)
 	}
@@ -619,7 +631,7 @@ func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
 // TaskCountAllUserTask returns total tasks for given user
 func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
 	var total int64
-	query := DB.Model(&Task{}).Where("user_id = ?", userId)
+	query := DB.Model(&Task{}).Where("user_id = ? AND org_id = 0", userId)
 	if queryParams.TaskID != "" {
 		query = query.Where("task_id = ?", queryParams.TaskID)
 	}

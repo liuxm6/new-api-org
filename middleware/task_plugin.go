@@ -456,7 +456,7 @@ func renderTaskPluginRouteQuery(c *gin.Context, pinned pluginruntime.PinnedRoute
 				platforms = append(platforms, taskPluginLegacyPlatforms(candidate.Plugin.Meta)...)
 			}
 		}
-		tasks, err := model.GetByTaskIdsForPlatforms(common.GetContextKeyInt(c, constant.ContextKeyUserId), platforms, slices.Compact(slices.Sorted(slices.Values(taskIDs))))
+		tasks, err := model.GetTasksInScopeForPlatforms(model.TaskScopeFromContext(c, common.GetContextKeyInt(c, constant.ContextKeyUserId)), platforms, slices.Compact(slices.Sorted(slices.Values(taskIDs))))
 		if err != nil {
 			abortTaskPluginRouteError(c, http.StatusInternalServerError)
 			return
@@ -502,7 +502,7 @@ func renderTaskPluginRouteQuery(c *gin.Context, pinned pluginruntime.PinnedRoute
 // taskPluginOwnsTasks reports whether every task id names a retrievable task
 // of the caller on one of the plugin's platforms.
 func taskPluginOwnsTasks(c *gin.Context, meta pluginruntime.Meta, taskIDs []string) (bool, error) {
-	tasks, err := model.GetByTaskIdsForPlatforms(common.GetContextKeyInt(c, constant.ContextKeyUserId), taskPluginLegacyPlatforms(meta), taskIDs)
+	tasks, err := model.GetTasksInScopeForPlatforms(model.TaskScopeFromContext(c, common.GetContextKeyInt(c, constant.ContextKeyUserId)), taskPluginLegacyPlatforms(meta), taskIDs)
 	if err != nil {
 		return false, err
 	}
@@ -1315,7 +1315,7 @@ func applyOriginTaskIntent(c *gin.Context, intent map[string]any, meta pluginrun
 		return nil
 	}
 
-	userID := common.GetContextKeyInt(c, constant.ContextKeyUserId)
+	scope := model.TaskScopeFromContext(c, common.GetContextKeyInt(c, constant.ContextKeyUserId))
 	platforms := taskPluginLegacyPlatforms(meta)
 	allowedPlatform := make(map[constant.TaskPlatform]struct{}, len(platforms))
 	for _, platform := range platforms {
@@ -1325,7 +1325,7 @@ func applyOriginTaskIntent(c *gin.Context, intent map[string]any, meta pluginrun
 	tasks := make([]*model.Task, 0, len(ids))
 	channelID := 0
 	for _, id := range ids {
-		task, exist, err := model.GetByTaskId(userID, id)
+		task, exist, err := model.GetTaskInScope(scope, id)
 		if err != nil {
 			return &originTaskIntentError{Code: "origin_task_not_found", Message: "origin task not found or not owned by you", StatusCode: http.StatusInternalServerError}
 		}
@@ -1394,9 +1394,9 @@ func renderTaskPluginQuery(
 		len(taskIDs),
 		multiple,
 	)
-	userID := common.GetContextKeyInt(c, constant.ContextKeyUserId)
+	scope := model.TaskScopeFromContext(c, common.GetContextKeyInt(c, constant.ContextKeyUserId))
 	platforms := taskPluginLegacyPlatforms(pinned.Plugin.Meta)
-	tasks, err := model.GetByTaskIdsForPlatforms(userID, platforms, taskIDs)
+	tasks, err := model.GetTasksInScopeForPlatforms(scope, platforms, taskIDs)
 	if err != nil {
 		logger.LogDebug(
 			c,
@@ -1457,7 +1457,7 @@ func renderTaskPluginQuery(
 	presenterContext := requestContext.JSValue()
 	artifacts := map[string]any{}
 	if !multiple {
-		projected, projectErr := taskjsplugin.RendererArtifacts(pinned.Plugin, tasksByID[taskIDs[0]], service.BuildTaskArtifactContentURL)
+		projected, projectErr := taskjsplugin.RendererArtifacts(pinned.Plugin, tasksByID[taskIDs[0]], TaskArtifactURLBuilder(c, tasksByID[taskIDs[0]]))
 		if projectErr != nil {
 			logger.LogWarn(c, common.LogText("task_plugin subsystem=query event=artifacts_unavailable generation=%d plugin=%q err=%q", generation, pinned.Plugin.Meta.Key, projectErr.Error()))
 		} else {

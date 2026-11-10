@@ -284,6 +284,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			wg.Done()
 		}()
 
+		var forwardedBytes int64
 		for scanner.Scan() {
 			// 检查是否需要停止
 			select {
@@ -307,6 +308,15 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				continue
 			}
 			if data != "[DONE]" {
+				if budget := info.OrgStreamByteBudget; budget > 0 {
+					forwardedBytes += int64(len(data))
+					if forwardedBytes > budget {
+						// Stop reading the upstream; the adaptor's tail then ends the client stream normally.
+						logger.LogWarn(c, common.LogText("organization stream stopped at its byte budget %d", budget))
+						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonBudget, nil)
+						return
+					}
+				}
 				info.SetFirstResponseTime()
 				info.ReceivedResponseCount++
 

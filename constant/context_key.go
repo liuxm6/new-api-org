@@ -11,9 +11,14 @@ const (
 	ContextKeyRequestStartTime ContextKey = "request_start_time"
 
 	/* token related keys */
-	ContextKeyTokenUnlimited         ContextKey = "token_unlimited_quota"
-	ContextKeyTokenKey               ContextKey = "token_key"
-	ContextKeyTokenId                ContextKey = "token_id"
+	ContextKeyTokenUnlimited ContextKey = "token_unlimited_quota"
+	ContextKeyTokenKey       ContextKey = "token_key"
+	ContextKeyTokenId        ContextKey = "token_id"
+
+	// Trusted organization state written by TokenAuth. Absent for personal keys.
+	ContextKeyOrgSubject             ContextKey = "org_subject"
+	ContextKeyOrgPolicyVersion       ContextKey = "org_policy_version"
+	ContextKeyOrgRecoveryRequired    ContextKey = "org_recovery_required"
 	ContextKeyTokenGroup             ContextKey = "token_group"
 	ContextKeyOriginTasks            ContextKey = "origin_tasks"
 	ContextKeyChannelConstraints     ContextKey = "channel_constraints"

@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 
+	"github.com/QuantumNous/new-api/types"
 	"gorm.io/gorm"
 )
 
@@ -134,6 +135,20 @@ func GetRedemptionById(id int) (*Redemption, error) {
 }
 
 func Redeem(key string, userId int) (quota int, err error) {
+	return redeemInto(key, userId, userId)
+}
+
+// RedeemToOrganization redeems a code into an organization wallet on behalf of
+// an operator whose role the caller has already proven. The code is spent by
+// the wallet; the operator is recorded on the ledger and audit rows.
+func RedeemToOrganization(key string, walletUserID, operatorID int) (quota int, err error) {
+	if operatorID <= 0 {
+		return 0, errors.New("invalid operator")
+	}
+	return redeemInto(key, walletUserID, operatorID)
+}
+
+func redeemInto(key string, userId int, operatorID int) (quota int, err error) {
 	if key == "" {
 		return 0, errors.New("redemption code not provided")
 	}
@@ -174,13 +189,18 @@ func Redeem(key string, userId int) (quota int, err error) {
 		if result.RowsAffected == 0 {
 			return errors.New("redemption code already used")
 		}
-		return creditTopUpQuota(tx, userId, redemption.Quota, nil)
+		return creditWalletTx(tx, userId, redemption.Quota, nil, &orgCreditSource{ledgerType: types.OrgLedgerTopUp,
+			refType: "redemption", refID: strconv.Itoa(redemption.Id), key: "redemption:" + strconv.Itoa(redemption.Id),
+			operatorID: operatorID})
 	})
 	if err != nil {
 		common.SysError(common.LogText("redemption failed: %s", err.Error()))
 		return 0, ErrRedeemFailed
 	}
 	syncCreditUserQuotaCache(userId, redemption.Quota, common.LogText("redemption"))
+	if userId != operatorID {
+		return redemption.Quota, nil // an organization wallet has its ledger, not a personal log
+	}
 	RecordLog(userId, LogTypeTopup, common.NewMessage("Topped up {{quota}} with a redemption code, code ID {{id}}", map[string]any{"quota": logger.FormatQuota(redemption.Quota), "id": redemption.Id}))
 	return redemption.Quota, nil
 }

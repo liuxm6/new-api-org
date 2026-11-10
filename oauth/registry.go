@@ -118,6 +118,11 @@ func LoadCustomProviders() error {
 	// Register each custom provider
 	var conflict error
 	for _, config := range customProviders {
+		if config.OrgId > 0 {
+			// Tenant IdPs sign people into their own organization only, through
+			// OrgOIDCProvider. They never join the platform login registry.
+			continue
+		}
 		provider := NewGenericOAuthProvider(config)
 		if err := RegisterCustom(config.Slug, provider); err != nil {
 			common.SysError(err.Error())
@@ -138,6 +143,9 @@ func ReloadCustomProviders() error {
 
 // RegisterOrUpdateCustomProvider registers or updates a single custom provider
 func RegisterOrUpdateCustomProvider(config *model.CustomOAuthProvider) {
+	if config.OrgId > 0 {
+		return
+	}
 	provider := NewGenericOAuthProvider(config)
 	if err := RegisterCustom(config.Slug, provider); err != nil {
 		common.SysError(err.Error())

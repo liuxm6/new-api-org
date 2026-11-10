@@ -114,6 +114,9 @@ func taskIsSubscription(task *model.Task) bool {
 
 // taskAdjustFunding 调整任务的资金来源（钱包或订阅），delta > 0 表示扣费，delta < 0 表示退还。
 func taskAdjustFunding(task *model.Task, delta int) error {
+	if task.OrgId > 0 {
+		return errOrgTaskWalletPath
+	}
 	if taskIsSubscription(task) {
 		return model.PostConsumeUserSubscriptionDelta(task.PrivateData.SubscriptionId, int64(delta))
 	}
@@ -126,7 +129,7 @@ func taskAdjustFunding(task *model.Task, delta int) error {
 // taskAdjustTokenQuota 调整任务的令牌额度，delta > 0 表示扣费，delta < 0 表示退还。
 // 需要通过 resolveTokenKey 运行时获取 key（不从 PrivateData 中读取）。
 func taskAdjustTokenQuota(ctx context.Context, task *model.Task, delta int) {
-	if task.PrivateData.TokenId <= 0 || delta == 0 {
+	if task.OrgId > 0 || task.PrivateData.TokenId <= 0 || delta == 0 {
 		return
 	}
 	tokenKey := resolveTokenKey(ctx, task.PrivateData.TokenId, task.TaskID)
@@ -261,6 +264,9 @@ func taskModelName(task *model.Task) string {
 // 当异步任务失败时，退还资金与令牌额度，并回减用户和渠道用量。
 // 返回资金来源是否已成功退还；失败时保留 quota，供显式重试或人工对账。
 func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool {
+	if task.OrgId > 0 {
+		return refundOrgTaskQuota(ctx, task, reason)
+	}
 	quota := task.Quota
 	if quota == 0 {
 		return true
@@ -284,14 +290,17 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 	other.SetPublic("task_id", task.TaskID)
 	other.SetPublic("reason", reason)
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
-		UserId:    task.UserId,
-		LogType:   model.LogTypeRefund,
-		ChannelId: task.ChannelId,
-		ModelName: taskModelName(task),
-		Quota:     quota,
-		TokenId:   task.PrivateData.TokenId,
-		Group:     task.Group,
-		Other:     other,
+		OrgId:       task.OrgId,
+		WorkspaceId: task.WorkspaceId,
+		ActorUserId: task.ActorUserId,
+		UserId:      task.UserId,
+		LogType:     model.LogTypeRefund,
+		ChannelId:   task.ChannelId,
+		ModelName:   taskModelName(task),
+		Quota:       quota,
+		TokenId:     task.PrivateData.TokenId,
+		Group:       task.Group,
+		Other:       other,
 	})
 
 	// 5. 资金退款完成后再清除持久化标记。
@@ -309,6 +318,10 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 // clamps 可选：若计算 actualQuota 时发生额度饱和，将其记入日志 admin_info（仅管理员可见）。
 func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason *common.Message, clamps ...*common.QuotaClamp) {
 	if actualQuota < 0 {
+		return
+	}
+	if task.OrgId > 0 {
+		recalculateOrgTaskQuota(ctx, task, actualQuota, reason, clamps...)
 		return
 	}
 	preConsumedQuota := task.Quota
@@ -363,16 +376,19 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 		attachQuotaSaturationToOther(other, clamp)
 	}
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
-		UserId:    task.UserId,
-		LogType:   logType,
-		Content:   []*common.Message{reason},
-		ChannelId: task.ChannelId,
-		ModelName: taskModelName(task),
-		Quota:     logQuota,
-		TokenId:   task.PrivateData.TokenId,
-		Group:     task.Group,
-		Other:     other,
-		NodeName:  task.PrivateData.NodeName,
+		OrgId:       task.OrgId,
+		WorkspaceId: task.WorkspaceId,
+		ActorUserId: task.ActorUserId,
+		UserId:      task.UserId,
+		LogType:     logType,
+		Content:     []*common.Message{reason},
+		ChannelId:   task.ChannelId,
+		ModelName:   taskModelName(task),
+		Quota:       logQuota,
+		TokenId:     task.PrivateData.TokenId,
+		Group:       task.Group,
+		Other:       other,
+		NodeName:    task.PrivateData.NodeName,
 	})
 }
 

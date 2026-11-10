@@ -51,6 +51,10 @@ func Distribute() func(c *gin.Context) {
 			return
 		}
 		_, pinned, _ := constraints.ResolvedPin()
+		// Guardrails apply to pinned channels too: a pin never exempts a request.
+		if !enforceOrgGuardrails(c, modelRequest.Model) {
+			return
+		}
 		if !pinned {
 			// Select a channel for the user
 			// check token model mapping
@@ -576,8 +580,7 @@ func getTaskOriginModelName(c *gin.Context) string {
 		return ""
 	}
 
-	userId := c.GetInt("id")
-	if task, exist, err := model.GetByTaskId(userId, taskId); err == nil && exist && task != nil {
+	if task, exist, err := model.GetTaskInScope(model.TaskScopeFromContext(c, c.GetInt("id")), taskId); err == nil && exist && task != nil {
 		return task.Properties.OriginModelName
 	}
 	return ""

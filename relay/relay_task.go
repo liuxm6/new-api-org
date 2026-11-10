@@ -65,7 +65,9 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	}
 
 	// 查找原始任务
-	originTask, exist, err := model.GetByTaskId(info.UserId, info.OriginTaskID)
+	// The origin task is read through the caller's scope: an organization key can
+	// only continue a task its own subject could read.
+	originTask, exist, err := model.GetTaskInScope(model.ReadTaskScope(info.OrgSubject, info.UserId), info.OriginTaskID)
 	if err != nil {
 		return service.TaskErrorWrapper(err, "get_origin_task_failed", http.StatusInternalServerError, common.UpstreamAddresses(c)...)
 	}
@@ -476,7 +478,7 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	}
 	userId := c.GetInt("id")
 
-	originTask, exist, err := model.GetByTaskId(userId, taskId)
+	originTask, exist, err := model.GetTaskInScope(model.TaskScopeFromContext(c, userId), taskId)
 	if err != nil {
 		taskResp = service.TaskErrorWrapper(err, "get_task_failed", http.StatusInternalServerError)
 		return
@@ -614,7 +616,7 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 		"metadata": nil,
 		"status":   mapTaskStatusToSimple(task.Status),
 		"task_id":  task.TaskID,
-		"url":      task.GetResultURL(),
+		"url":      taskClientResultURL(task),
 	}
 	respBody, _ := common.Marshal(dto.TaskResponse[any]{
 		Code: "success",
@@ -662,6 +664,22 @@ func mapTaskStatusToSimple(status model.TaskStatus) string {
 	}
 }
 
+// taskClientResultURL is the result URL a client may be shown. A personal task
+// keeps its stored URL. An organization task never exposes the upstream
+// location, which would let a reader fetch it outside the gateway for as long as
+// the vendor keeps it alive: it gets the gateway's authenticated video route.
+func taskClientResultURL(task *model.Task) string {
+	if task.OrgId == 0 {
+		return task.GetResultURL()
+	}
+	// GetResultURL falls back to the fail reason for historical personal rows;
+	// an organization task has no such rows, so only a stored result counts.
+	if task.Status == model.TaskStatusSuccess && task.PrivateData.ResultURL != "" {
+		return taskcommon.BuildProxyURL(task.TaskID)
+	}
+	return ""
+}
+
 func TaskModel2Dto(task *model.Task) *dto.TaskDto {
 	return &dto.TaskDto{
 		ID:         task.ID,
@@ -676,7 +694,7 @@ func TaskModel2Dto(task *model.Task) *dto.TaskDto {
 		Action:     constant.NormalizeTaskAction(task.Action),
 		Status:     string(task.Status),
 		FailReason: task.FailReason,
-		ResultURL:  task.GetResultURL(),
+		ResultURL:  taskClientResultURL(task),
 		SubmitTime: task.SubmitTime,
 		StartTime:  task.StartTime,
 		FinishTime: task.FinishTime,

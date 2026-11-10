@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/types"
 
@@ -76,6 +77,10 @@ type Log struct {
 	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
 	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
 	Other             string `json:"other"`
+	// Operational attribution only; billing facts live in org_spend_events.
+	OrgId       int `json:"org_id,omitempty" gorm:"default:0;index:idx_logs_org_ws_time,priority:1"`
+	WorkspaceId int `json:"workspace_id,omitempty" gorm:"default:0;index:idx_logs_org_ws_time,priority:2"`
+	ActorUserId int `json:"actor_user_id,omitempty" gorm:"default:0"`
 }
 
 // don't use iota, avoid change log type value
@@ -336,6 +341,24 @@ type RecordConsumeLogParams struct {
 	Other            *LogOther         `json:"other"`
 }
 
+// orgAttribution reads the trusted organization subject that TokenAuth stored.
+// It returns zeros for personal and legacy requests and never trusts request
+// input.
+func orgAttribution(c *gin.Context) (orgID, workspaceID, actorUserID int) {
+	if c == nil {
+		return 0, 0, 0
+	}
+	value, exists := c.Get(string(constant.ContextKeyOrgSubject))
+	if !exists {
+		return 0, 0, 0
+	}
+	subject, ok := value.(types.OrgSubject)
+	if !ok {
+		return 0, 0, 0
+	}
+	return subject.OrgID, subject.WorkspaceID, subject.ActorUserID
+}
+
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
 	if !common.LogConsumeEnabled {
 		return
@@ -355,7 +378,11 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 			needRecordIp = true
 		}
 	}
+	orgID, workspaceID, actorUserID := orgAttribution(c)
 	log := &Log{
+		OrgId:            orgID,
+		WorkspaceId:      workspaceID,
+		ActorUserId:      actorUserID,
 		UserId:           userId,
 		Username:         username,
 		CreatedAt:        createdAt,
@@ -406,21 +433,29 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 			TokenID:             params.TokenId,
 			ChannelID:           params.ChannelId,
 			NodeName:            common.NodeName,
+			OrgID:               orgID,
+			WorkspaceID:         workspaceID,
+			ActorUserID:         actorUserID,
 		})
 	}
 }
 
 type RecordTaskBillingLogParams struct {
-	UserId    int
-	LogType   int
-	Content   []*common.Message
-	ChannelId int
-	ModelName string
-	Quota     int
-	TokenId   int
-	Group     string
-	Other     *LogOther
-	NodeName  string // 任务发起节点；为空时回退当前节点
+	// Attribution comes from the task's persisted owner snapshot, never from a
+	// key that may since have been rotated or deleted.
+	OrgId       int
+	WorkspaceId int
+	ActorUserId int
+	UserId      int
+	LogType     int
+	Content     []*common.Message
+	ChannelId   int
+	ModelName   string
+	Quota       int
+	TokenId     int
+	Group       string
+	Other       *LogOther
+	NodeName    string // 任务发起节点；为空时回退当前节点
 }
 
 func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
@@ -437,18 +472,21 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	createdAt := common.GetTimestamp()
 	other := params.Other
 	log := &Log{
-		UserId:    params.UserId,
-		Username:  username,
-		CreatedAt: createdAt,
-		Type:      params.LogType,
-		Content:   other.setContent(params.Content),
-		TokenName: tokenName,
-		ModelName: params.ModelName,
-		Quota:     params.Quota,
-		ChannelId: params.ChannelId,
-		TokenId:   params.TokenId,
-		Group:     params.Group,
-		Other:     other.JSONString(),
+		OrgId:       params.OrgId,
+		WorkspaceId: params.WorkspaceId,
+		ActorUserId: params.ActorUserId,
+		UserId:      params.UserId,
+		Username:    username,
+		CreatedAt:   createdAt,
+		Type:        params.LogType,
+		Content:     other.setContent(params.Content),
+		TokenName:   tokenName,
+		ModelName:   params.ModelName,
+		Quota:       params.Quota,
+		ChannelId:   params.ChannelId,
+		TokenId:     params.TokenId,
+		Group:       params.Group,
+		Other:       other.JSONString(),
 	}
 	err := createLog(log)
 	if err != nil {
@@ -469,6 +507,10 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 			TokenID:   params.TokenId,
 			ChannelID: params.ChannelId,
 			NodeName:  nodeName,
+
+			OrgID:       params.OrgId,
+			WorkspaceID: params.WorkspaceId,
+			ActorUserID: params.ActorUserId,
 		})
 	}
 }

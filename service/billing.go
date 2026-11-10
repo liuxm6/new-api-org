@@ -38,6 +38,9 @@ func PreConsumeBilling(c *gin.Context, preConsumedQuota int, relayInfo *relaycom
 			types.ErrOptionWithSkipRetry(),
 		)
 	}
+	if relayInfo != nil && relayInfo.IsOrgRequest() {
+		return preConsumeOrgBilling(c, relayInfo, preConsumedQuota)
+	}
 	if relayInfo != nil && relayInfo.Billing != nil {
 		if err := relayInfo.Billing.ReserveBeforeSubmit(preConsumedQuota); err != nil {
 			var apiErr *types.NewAPIError
@@ -100,7 +103,11 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 		return nil
 	}
 
-	// 回退：无 BillingSession 时使用旧路径
+	// 回退：无 BillingSession 时使用旧路径。组织请求绝不能走到这里：
+	// 它没有会话就说明准入被绕过了，直接报错并告警，不碰钱。
+	if relayInfo.IsOrgRequest() {
+		return errOrgLegacyBilling("SettleBilling", relayInfo)
+	}
 	quotaDelta := actualQuota - relayInfo.FinalPreConsumedQuota
 	if quotaDelta != 0 {
 		return PostConsumeQuota(relayInfo, quotaDelta, relayInfo.FinalPreConsumedQuota, true)

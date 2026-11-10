@@ -14,6 +14,9 @@ type RequestInput struct {
 	// ImageCount is a validated billing quantity, separate from the frozen
 	// request's n. Settlement can replace it with the actual returned count.
 	ImageCount *int
+	// probes pins hour/minute/weekday/month/day reads to chosen values, keyed by
+	// probeKey. Only the organization upper bound sets it; nil reads the clock.
+	probes map[string]int
 }
 
 // TokenParams holds all token dimensions passed into an Expr evaluation.

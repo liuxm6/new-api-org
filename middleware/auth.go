@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	orgtypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -104,6 +105,10 @@ func TryUserAuth() func(c *gin.Context) {
 		if errors.Is(err, model.ErrLegacyAccessTokenRetired) {
 			// After the deadline no opaque value is looked up, so a retired
 			// token is indistinguishable from any unknown value: anonymous.
+			credentialKind, err = dashboardCredentialUnmatched, nil
+		}
+		if errors.Is(err, errSessionScopeDenied) {
+			// An org-restricted session on a route it may not use stays anonymous.
 			credentialKind, err = dashboardCredentialUnmatched, nil
 		}
 		if err != nil {
@@ -212,8 +217,11 @@ func classifyDashboardCredential(c *gin.Context) (*model.UserBase, service.AuthI
 		if err != nil {
 			return nil, service.AuthIdentity{}, dashboardCredentialInternal, err
 		}
-		_, user, err := service.ValidateLoginSession(identity)
+		session, user, err := service.ValidateLoginSession(identity)
 		if err != nil {
+			return nil, service.AuthIdentity{}, dashboardCredentialInternal, err
+		}
+		if err := checkSessionScope(c, session.EffectiveAuthScope(), session.OrgID); err != nil {
 			return nil, service.AuthIdentity{}, dashboardCredentialInternal, err
 		}
 		return user, identity, dashboardCredentialInternal, nil
@@ -383,6 +391,10 @@ func abortWithWebMessage(c *gin.Context, status int, code string, message *commo
 }
 
 func writeDashboardAuthError(c *gin.Context, err error) {
+	if errors.Is(err, errSessionScopeDenied) {
+		abortWithOrgError(c, orgtypes.NewOrgAccessError(orgtypes.OrgErrSessionScope))
+		return
+	}
 	if errors.Is(err, model.ErrAccessTokenExpired) {
 		abortWithWebMessage(c, http.StatusUnauthorized, "ACCESS_TOKEN_EXPIRED", common.NewMessage("Unauthorized, the access token has expired"))
 		return
@@ -438,7 +450,10 @@ func TokenOrUserAuth() func(c *gin.Context) {
 				writeDashboardAuthError(c, err)
 				return
 			}
-			_, user, err := service.ValidateLoginSession(identity)
+			session, user, err := service.ValidateLoginSession(identity)
+			if err == nil {
+				err = checkSessionScope(c, session.EffectiveAuthScope(), session.OrgID)
+			}
 			if err != nil {
 				writeDashboardAuthError(c, err)
 				return
@@ -480,6 +495,14 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 				common.ApiErrorStatus(c, http.StatusInternalServerError, errors.New(common.TranslateMessage(c, i18n.MsgDatabaseError)))
 			}
 			c.Abort()
+			return
+		}
+
+		// Organization keys have no read-only token endpoint: usage and logs of a
+		// workspace are read through the authenticated control plane, never with a
+		// key that could also spend the shared wallet.
+		if token.OrgId > 0 {
+			abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgAuthOrgKeyForbidden), types.ErrorCodeAccessDenied)
 			return
 		}
 
@@ -614,6 +637,9 @@ func TokenAuth() func(c *gin.Context) {
 		userEnabled := userCache.Status == common.UserStatusEnabled
 		if !userEnabled {
 			abortWithOpenAiMessage(c, http.StatusForbidden, common.TranslateMessage(c, i18n.MsgAuthUserBanned))
+			return
+		}
+		if !applyOrgTokenContext(c, token) {
 			return
 		}
 

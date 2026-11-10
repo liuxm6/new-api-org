@@ -724,3 +724,52 @@ func TestSetEventStreamHeadersBoundsStreamWritesByBudget(t *testing.T) {
 	assert.False(t, recorder.deadlines[0].Before(before.Add(streamWriteTimeout+450*time.Second)))
 	assert.Contains(t, recorder.Body.String(), "data: AAAA")
 }
+
+func TestStreamScannerHandler_OrgByteBudget(t *testing.T) {
+	t.Parallel()
+
+	// each chunk is `data: {...}`; the handler sees the part after the prefix
+	chunk := `{"c":"0123456789"}`
+	body := strings.Repeat("data: "+chunk+"\n", 20) + "data: [DONE]\n"
+
+	t.Run("no budget forwards everything", func(t *testing.T) {
+		c, resp, info := setupStreamTest(t, strings.NewReader(body))
+		info.DisablePing = true
+		var count int
+		StreamScannerHandler(c, resp, info, func(string, *StreamResult) { count++ })
+		assert.Equal(t, 20, count)
+		assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+	})
+
+	t.Run("a budget above the stream changes nothing", func(t *testing.T) {
+		c, resp, info := setupStreamTest(t, strings.NewReader(body))
+		info.DisablePing = true
+		info.OrgStreamByteBudget = int64(len(chunk) * 20)
+		var count int
+		StreamScannerHandler(c, resp, info, func(string, *StreamResult) { count++ })
+		assert.Equal(t, 20, count)
+		assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+	})
+
+	t.Run("a budget below the stream ends it normally at the chunk that crosses it", func(t *testing.T) {
+		c, resp, info := setupStreamTest(t, strings.NewReader(body))
+		info.DisablePing = true
+		info.OrgStreamByteBudget = int64(len(chunk)*5 + 3)
+		var count int
+		StreamScannerHandler(c, resp, info, func(string, *StreamResult) { count++ })
+		assert.Equal(t, 5, count, "the chunk that crosses the budget is not forwarded")
+		assert.Equal(t, relaycommon.StreamEndReasonBudget, info.StreamStatus.EndReason)
+		assert.True(t, info.StreamStatus.IsNormalEnd(), "the adaptor's normal ending still runs")
+		assert.False(t, info.StreamStatus.HasErrors())
+	})
+
+	t.Run("the budget counts the whole stream, not each chunk", func(t *testing.T) {
+		c, resp, info := setupStreamTest(t, strings.NewReader(body))
+		info.DisablePing = true
+		info.OrgStreamByteBudget = int64(len(chunk)) // one chunk fits, two do not
+		var count int
+		StreamScannerHandler(c, resp, info, func(string, *StreamResult) { count++ })
+		assert.Equal(t, 1, count)
+		assert.Equal(t, relaycommon.StreamEndReasonBudget, info.StreamStatus.EndReason)
+	})
+}

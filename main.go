@@ -30,6 +30,7 @@ import (
 	"github.com/QuantumNous/new-api/router"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
+	orgsvc "github.com/QuantumNous/new-api/service/org"
 	_ "github.com/QuantumNous/new-api/setting/performance_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
@@ -134,6 +135,14 @@ func main() {
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()
 
+	// Organization key compensation: every 5 minutes disable keys nobody is
+	// entitled to any more. It backs up, and never replaces, the revocation done
+	// in the transaction that removes a person's access.
+	if common.IsMasterNode {
+		go orgsvc.StartOrphanKeySweeper(context.Background())
+		orgsvc.StartOrgBillingWorkers(context.Background())
+	}
+
 	// Report this process as a system instance so the System Info page can show
 	// all currently alive nodes in multi-instance deployments.
 	service.StartSystemInstanceReporter()
@@ -229,6 +238,9 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(common.LogText("server forced to shutdown: %v", err))
 	}
+	// Requests are done: hand this instance's unused lease money back now
+	// instead of waiting for the sweeper.
+	service.RevokeOrgInstanceQuotaLeases(ctx)
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
 		model.SaveQuotaDataCache()

@@ -1,12 +1,14 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
@@ -20,7 +22,7 @@ const (
 	taskArtifactAccessInvalidContextKey   = "task_artifact_access_invalid"
 	taskArtifactAccessRateWindow          = time.Minute
 	taskArtifactAccessCleanupInterval     = time.Minute
-	maxEncodedTaskArtifactAccessQuerySize = 128
+	maxEncodedTaskArtifactAccessQuerySize = 512
 )
 
 type taskArtifactRateEntry struct {
@@ -116,7 +118,8 @@ func redactTaskArtifactAccessQuery() gin.HandlerFunc {
 			strings.HasSuffix(path, "/content")
 		isLegacyVideoContent := strings.HasPrefix(path, "/v1/videos/") &&
 			strings.HasSuffix(path, "/content")
-		if !isArtifactContent && !isLegacyVideoContent {
+		isMidjourneyImage := strings.Contains(path, "/mj/image/")
+		if !isArtifactContent && !isLegacyVideoContent && !isMidjourneyImage {
 			c.Next()
 			return
 		}
@@ -196,6 +199,10 @@ func TokenOrTaskArtifactAccessAuth(taskParam, artifactParam string) gin.HandlerF
 		if ip == "" {
 			ip = "unknown"
 		}
+		if !invalid && service.IsOrgArtifactTicket(rawAccess) {
+			authorizeOrgArtifactTicket(c, rawAccess, taskID, artifactKey, ip)
+			return
+		}
 		if invalid || !service.VerifyTaskArtifactAccess(rawAccess, taskID, artifactKey) {
 			if !taskArtifactAnonymousLimiter.invalidAttempt(time.Now(), ip) {
 				writeTaskArtifactAccessLimited(c)
@@ -215,6 +222,40 @@ func TokenOrTaskArtifactAccessAuth(taskParam, artifactParam string) gin.HandlerF
 		c.Set(TaskArtifactAccessContextKey, true)
 		c.Next()
 	}
+}
+
+// authorizeOrgArtifactTicket admits a v2 organization ticket in the fixed order
+// the design requires: signature and expiry first (no database), then the
+// anonymous limiter, then the database recheck of the organization, workspace,
+// key and subject. Every refusal answers like a missing artifact. Only a
+// forged ticket counts against the per-address invalid-attempt budget; a
+// genuine ticket that expired or was revoked is not an attack, and a page
+// holding several of them must not lock its reader out.
+func authorizeOrgArtifactTicket(c *gin.Context, access, taskID, artifactKey, ip string) {
+	claims, err := service.VerifyOrgArtifactTicket(access, taskID, artifactKey, time.Now())
+	if err != nil {
+		if errors.Is(err, service.ErrOrgArtifactTicketInvalid) && !taskArtifactAnonymousLimiter.invalidAttempt(time.Now(), ip) {
+			writeTaskArtifactAccessLimited(c)
+			return
+		}
+		writeTaskArtifactAccessNotFound(c)
+		return
+	}
+	release, ok := taskArtifactAnonymousLimiter.acquire(ip, taskID, artifactKey)
+	if !ok {
+		writeTaskArtifactAccessLimited(c)
+		return
+	}
+	defer release()
+
+	scope, err := service.ResolveOrgArtifactTicketScope(c.Request.Context(), claims)
+	if err != nil {
+		writeTaskArtifactAccessNotFound(c)
+		return
+	}
+	model.SetOrgTicketScope(c, scope)
+	c.Set(TaskArtifactAccessContextKey, true)
+	c.Next()
 }
 
 func IsTaskArtifactAccess(c *gin.Context) bool {

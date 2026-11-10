@@ -203,7 +203,7 @@ func buildLegacyParamOverride(paramOverride map[string]any) map[string]any {
 func ApplyParamOverrideWithRelayInfo(jsonData []byte, info *RelayInfo) ([]byte, error) {
 	paramOverride := getParamOverrideMap(info)
 	if len(paramOverride) == 0 {
-		return jsonData, nil
+		return clampOrgOutput(jsonData, info)
 	}
 
 	overrideCtx := BuildParamOverrideContext(info)
@@ -225,7 +225,16 @@ func ApplyParamOverrideWithRelayInfo(jsonData []byte, info *RelayInfo) ([]byte, 
 			info.ParamOverrideAudit = nil
 		}
 	}
-	return result, nil
+	return clampOrgOutput(result, info)
+}
+
+// clampOrgOutput keeps the final body inside the output cap an organization
+// reservation was made for. Personal requests carry no cap and pass unchanged.
+func clampOrgOutput(body []byte, info *RelayInfo) ([]byte, error) {
+	if info == nil || info.OrgOutputCap <= 0 {
+		return body, nil
+	}
+	return ClampOrgOutputLimits(body, info.OrgOutputCap)
 }
 
 func syncReasoningEffortAfterParamOverride(info *RelayInfo, before, after []byte) {

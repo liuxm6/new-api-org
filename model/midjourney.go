@@ -26,6 +26,13 @@ type Midjourney struct {
 
 	TokenId          int `json:"-" gorm:"default:0"`
 	BillingChannelId int `json:"-" gorm:"default:0"`
+
+	OrgId              int    `json:"-" gorm:"default:0;index:idx_mj_org_ws,priority:1"`
+	WorkspaceId        int    `json:"-" gorm:"default:0;index:idx_mj_org_ws,priority:2"`
+	ActorUserId        int    `json:"-" gorm:"default:0"`
+	OwnerType          string `json:"-" gorm:"type:varchar(16);default:''"`
+	AccessPrincipalId  string `json:"-" gorm:"type:varchar(64);default:''"`
+	BillingOperationId string `json:"-" gorm:"type:varchar(64);default:'';index"`
 }
 
 // TaskQueryParams 用于包含所有搜索条件的结构体，可以根据需求添加更多字段
@@ -40,8 +47,8 @@ func GetAllUserTask(userId int, startIdx int, num int, queryParams TaskQueryPara
 	var tasks []*Midjourney
 	var err error
 
-	// 初始化查询构建器
-	query := DB.Where("user_id = ?", userId)
+	// 初始化查询构建器。个人列表：组织任务只经对象授权入口读取。
+	query := DB.Where("user_id = ? AND org_id = 0", userId)
 
 	if queryParams.MjID != "" {
 		query = query.Where("mj_id = ?", queryParams.MjID)
@@ -67,8 +74,8 @@ func GetAllTasks(startIdx int, num int, queryParams TaskQueryParams) []*Midjourn
 	var tasks []*Midjourney
 	var err error
 
-	// 初始化查询构建器
-	query := DB
+	// 初始化查询构建器。平台总表只含个人任务；跨组织读取走带 platform.access 审计的独立入口。
+	query := DB.Where("org_id = 0")
 
 	// 添加过滤条件
 	if queryParams.ChannelID != "" {
@@ -130,7 +137,7 @@ func GetByOnlyMJId(mjId string) *Midjourney {
 func GetByMJId(userId int, mjId string) *Midjourney {
 	var mj *Midjourney
 	var err error
-	err = DB.Where("user_id = ? and mj_id = ?", userId, mjId).First(&mj).Error
+	err = DB.Where("user_id = ? and mj_id = ? and org_id = 0", userId, mjId).First(&mj).Error
 	if err != nil {
 		return nil
 	}
@@ -140,7 +147,7 @@ func GetByMJId(userId int, mjId string) *Midjourney {
 func GetByMJIds(userId int, mjIds []string) []*Midjourney {
 	var mj []*Midjourney
 	var err error
-	err = DB.Where("user_id = ? and mj_id in (?)", userId, mjIds).Find(&mj).Error
+	err = DB.Where("user_id = ? and mj_id in (?) and org_id = 0", userId, mjIds).Find(&mj).Error
 	if err != nil {
 		return nil
 	}
@@ -175,7 +182,7 @@ func (midjourney *Midjourney) Update() error {
 
 func (midjourney *Midjourney) UpdateBillingState() error {
 	return DB.Model(midjourney).
-		Select("quota", "token_id", "billing_channel_id").
+		Select("quota", "token_id", "billing_channel_id", "billing_operation_id").
 		Updates(midjourney).Error
 }
 
@@ -214,7 +221,7 @@ func MjBulkUpdateByTaskIds(taskIDs []int, params map[string]any) error {
 // CountAllTasks returns total midjourney tasks for admin query
 func CountAllTasks(queryParams TaskQueryParams) int64 {
 	var total int64
-	query := DB.Model(&Midjourney{})
+	query := DB.Model(&Midjourney{}).Where("org_id = 0")
 	if queryParams.ChannelID != "" {
 		query = query.Where("channel_id = ?", queryParams.ChannelID)
 	}
@@ -234,7 +241,7 @@ func CountAllTasks(queryParams TaskQueryParams) int64 {
 // CountAllUserTask returns total midjourney tasks for user
 func CountAllUserTask(userId int, queryParams TaskQueryParams) int64 {
 	var total int64
-	query := DB.Model(&Midjourney{}).Where("user_id = ?", userId)
+	query := DB.Model(&Midjourney{}).Where("user_id = ? AND org_id = 0", userId)
 	if queryParams.MjID != "" {
 		query = query.Where("mj_id = ?", queryParams.MjID)
 	}

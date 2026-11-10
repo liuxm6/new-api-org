@@ -122,12 +122,17 @@ func ChargeViolationFeeIfNeeded(ctx *gin.Context, relayInfo *relaycommon.RelayIn
 		return false
 	}
 
-	if err := PostConsumeQuota(relayInfo, feeQuota, 0, true); err != nil {
-		logger.LogError(ctx, common.LogText("failed to charge violation fee: %s", err.Error()))
-		return false
+	if relayInfo.IsOrgRequest() {
+		if !chargeOrgViolationFee(ctx, relayInfo, feeQuota) {
+			return false
+		}
+	} else {
+		if err := PostConsumeQuota(relayInfo, feeQuota, 0, true); err != nil {
+			logger.LogError(ctx, common.LogText("failed to charge violation fee: %s", err.Error()))
+			return false
+		}
+		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, feeQuota)
 	}
-
-	model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, feeQuota)
 	model.UpdateChannelUsedQuota(relayInfo.ChannelId, feeQuota)
 
 	useTimeSeconds := time.Now().Unix() - relayInfo.StartTime.Unix()

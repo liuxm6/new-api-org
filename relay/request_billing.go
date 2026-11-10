@@ -64,6 +64,9 @@ func PrepareRequestBilling(c *gin.Context, info *relaycommon.RelayInfo) *types.N
 		logger.LogInfo(c, common.LogText("model %s is free, skipping pre-consume", info.OriginModelName))
 		return nil
 	}
+	if info.IsOrgRequest() {
+		return service.PrepareOrgRequestBilling(c, info)
+	}
 	return service.PreConsumeBilling(c, priceData.QuotaToPreConsume, info)
 }
 

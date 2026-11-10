@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
+	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 )
@@ -29,6 +30,14 @@ import (
 func RelayMidjourneyImage(c *gin.Context) {
 	taskId := c.Param("id")
 	midjourneyTask := model.GetByOnlyMJId(taskId)
+	// An organization task is never public: it needs a v2 ticket that the route
+	// middleware rechecked, and is then read through that ticket's scope.
+	if midjourneyTask != nil && midjourneyTask.OrgId > 0 {
+		midjourneyTask = nil
+		if scope, ok := model.OrgTicketScopeFromContext(c); ok {
+			midjourneyTask = model.GetMJInScope(scope, taskId)
+		}
+	}
 	if midjourneyTask == nil {
 		c.JSON(400, gin.H{
 			"error": "midjourney_task_not_found",
@@ -110,7 +119,8 @@ func RelayMidjourneyNotify(c *gin.Context) *dto.MidjourneyResponse {
 		}
 	}
 	midjourneyTask := model.GetByOnlyMJId(midjRequest.MjId)
-	if midjourneyTask == nil {
+	// The notify hook carries no credential, so it never touches an organization task.
+	if midjourneyTask == nil || midjourneyTask.OrgId > 0 {
 		return &dto.MidjourneyResponse{
 			Code:        4,
 			Description: "midjourney_task_not_found",
@@ -150,7 +160,13 @@ func coverMidjourneyTaskDto(c *gin.Context, originTask *model.Midjourney) (midjo
 	midjourneyTask.StartTime = originTask.StartTime
 	midjourneyTask.FinishTime = originTask.FinishTime
 	midjourneyTask.ImageUrl = ""
-	if originTask.ImageUrl != "" && setting.MjForwardUrlEnabled {
+	if originTask.OrgId > 0 {
+		// Organization tasks never expose an upstream URL: the image goes through
+		// the gateway with a ticket bound to the reader, and video URLs are withheld.
+		if originTask.ImageUrl != "" {
+			midjourneyTask.ImageUrl = orgMidjourneyImageURL(c, originTask)
+		}
+	} else if originTask.ImageUrl != "" && setting.MjForwardUrlEnabled {
 		midjourneyTask.ImageUrl = system_setting.ServerAddress + "/mj/image/" + originTask.MjId
 		if originTask.Status != "SUCCESS" {
 			midjourneyTask.ImageUrl += "?rand=" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -158,7 +174,7 @@ func coverMidjourneyTaskDto(c *gin.Context, originTask *model.Midjourney) (midjo
 	} else {
 		midjourneyTask.ImageUrl = originTask.ImageUrl
 	}
-	if originTask.VideoUrl != "" {
+	if originTask.VideoUrl != "" && originTask.OrgId == 0 {
 		midjourneyTask.VideoUrl = originTask.VideoUrl
 	}
 	midjourneyTask.Status = originTask.Status
@@ -173,7 +189,7 @@ func coverMidjourneyTaskDto(c *gin.Context, originTask *model.Midjourney) (midjo
 			midjourneyTask.Buttons = buttons
 		}
 	}
-	if originTask.VideoUrls != "" {
+	if originTask.VideoUrls != "" && originTask.OrgId == 0 {
 		var videoUrls []dto.ImgUrls
 		err := common.Unmarshal([]byte(originTask.VideoUrls), &videoUrls)
 		if err == nil {
@@ -188,6 +204,28 @@ func coverMidjourneyTaskDto(c *gin.Context, originTask *model.Midjourney) (midjo
 		}
 	}
 	return
+}
+
+// orgMidjourneyImageURL is the gateway image URL with a ticket for the key that
+// is reading the task. If the ticket cannot be built the image is omitted.
+func orgMidjourneyImageURL(c *gin.Context, task *model.Midjourney) string {
+	value, ok := c.Get(string(constant.ContextKeyOrgSubject))
+	if !ok {
+		return ""
+	}
+	subject, _ := value.(types.OrgSubject)
+	if subject.OrgID != task.OrgId {
+		return ""
+	}
+	claims, ok := service.OrgArtifactClaimsForSubject(subject, c.GetInt64(string(constant.ContextKeyOrgPolicyVersion)))
+	if !ok {
+		return ""
+	}
+	imageURL, err := service.BuildOrgMidjourneyImageURL(claims, task.MjId)
+	if err != nil {
+		return ""
+	}
+	return imageURL
 }
 
 func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyResponse {
@@ -212,18 +250,27 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 		}
 	}
 
-	userQuota, err := model.GetUserQuota(info.UserId, false)
-	if err != nil {
-		return &dto.MidjourneyResponse{
-			Code:        4,
-			Description: err.Error(),
+	if info.IsOrgRequest() {
+		if priceData.Quota > 0 {
+			if apiErr := service.PreConsumeBilling(c, priceData.Quota, info); apiErr != nil {
+				return &dto.MidjourneyResponse{Code: 4, Description: apiErr.Error()}
+			}
+			defer refundUnsettledOrgReservation(c, info)
 		}
-	}
+	} else {
+		userQuota, err := model.GetUserQuota(info.UserId, false)
+		if err != nil {
+			return &dto.MidjourneyResponse{
+				Code:        4,
+				Description: err.Error(),
+			}
+		}
 
-	if userQuota-priceData.Quota < 0 {
-		return &dto.MidjourneyResponse{
-			Code:        4,
-			Description: "quota_not_enough",
+		if userQuota-priceData.Quota < 0 {
+			return &dto.MidjourneyResponse{
+				Code:        4,
+				Description: "quota_not_enough",
+			}
 		}
 	}
 	requestURL := getMjRequestPath(c.Request.URL.String())
@@ -254,6 +301,7 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 		FailReason:  "",
 		ChannelId:   c.GetInt("channel_id"),
 	}
+	midjourneyTask.ApplyOrgSubject(info.OrgSubject)
 	billingPrepared, billingErr := service.PrepareMidjourneyTaskBilling(
 		info,
 		midjourneyTask,
@@ -294,7 +342,9 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 			Group:     info.UsingGroup,
 			Other:     other,
 		})
-		model.UpdateUserUsedQuotaAndRequestCount(info.UserId, midjourneyTask.Quota)
+		if !info.IsOrgRequest() {
+			model.UpdateUserUsedQuotaAndRequestCount(info.UserId, midjourneyTask.Quota)
+		}
 		model.UpdateChannelUsedQuota(billingChannelId, midjourneyTask.Quota)
 	}
 	c.Writer.WriteHeader(mjResp.StatusCode)
@@ -312,7 +362,7 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 func RelayMidjourneyTaskImageSeed(c *gin.Context) *dto.MidjourneyResponse {
 	taskId := c.Param("id")
 	userId := c.GetInt("id")
-	originTask := model.GetByMJId(userId, taskId)
+	originTask := model.GetMJInScope(model.TaskScopeFromContext(c, userId), taskId)
 	if originTask == nil {
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "task_no_found")
 	}
@@ -349,7 +399,7 @@ func RelayMidjourneyTask(c *gin.Context, relayMode int) *dto.MidjourneyResponse 
 	switch relayMode {
 	case relayconstant.RelayModeMidjourneyTaskFetch:
 		taskId := c.Param("id")
-		originTask := model.GetByMJId(userId, taskId)
+		originTask := model.GetMJInScope(model.TaskScopeFromContext(c, userId), taskId)
 		if originTask == nil {
 			return &dto.MidjourneyResponse{
 				Code:        4,
@@ -377,7 +427,7 @@ func RelayMidjourneyTask(c *gin.Context, relayMode int) *dto.MidjourneyResponse 
 		}
 		var tasks []dto.MidjourneyDto
 		if len(condition.IDs) != 0 {
-			originTasks := model.GetByMJIds(userId, condition.IDs)
+			originTasks := model.GetMJsInScope(model.TaskScopeFromContext(c, userId), condition.IDs)
 			for _, originTask := range originTasks {
 				midjourneyTask := coverMidjourneyTaskDto(c, originTask)
 				tasks = append(tasks, midjourneyTask)
@@ -481,7 +531,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 			mjId = midjRequest.TaskId
 		}
 
-		originTask := model.GetByMJId(relayInfo.UserId, mjId)
+		originTask := model.GetMJInScope(model.ReadTaskScope(relayInfo.OrgSubject, relayInfo.UserId), mjId)
 		if originTask == nil {
 			return service.MidjourneyErrorWrapper(constant.MjRequestError, "task_not_found")
 		} else { //原任务的Status=SUCCESS，则可以做放大UPSCALE、变换VARIATION等动作，此时必须使用原来的请求地址才能正确处理
@@ -535,18 +585,27 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		}
 	}
 
-	userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
-	if err != nil {
-		return &dto.MidjourneyResponse{
-			Code:        4,
-			Description: err.Error(),
+	if relayInfo.IsOrgRequest() {
+		if consumeQuota && priceData.Quota > 0 {
+			if apiErr := service.PreConsumeBilling(c, priceData.Quota, relayInfo); apiErr != nil {
+				return &dto.MidjourneyResponse{Code: 4, Description: apiErr.Error()}
+			}
+			defer refundUnsettledOrgReservation(c, relayInfo)
 		}
-	}
+	} else {
+		userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
+		if err != nil {
+			return &dto.MidjourneyResponse{
+				Code:        4,
+				Description: err.Error(),
+			}
+		}
 
-	if consumeQuota && userQuota-priceData.Quota < 0 {
-		return &dto.MidjourneyResponse{
-			Code:        4,
-			Description: "quota_not_enough",
+		if consumeQuota && userQuota-priceData.Quota < 0 {
+			return &dto.MidjourneyResponse{
+				Code:        4,
+				Description: "quota_not_enough",
+			}
 		}
 	}
 
@@ -583,6 +642,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		FailReason:  "",
 		ChannelId:   c.GetInt("channel_id"),
 	}
+	midjourneyTask.ApplyOrgSubject(relayInfo.OrgSubject)
 	if midjResponse.Code == 3 {
 		//无实例账号自动禁用渠道（No available account instance）
 		channel, err := model.GetChannelById(midjourneyTask.ChannelId, true)
@@ -673,7 +733,9 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 			Group:     relayInfo.UsingGroup,
 			Other:     other,
 		})
-		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, midjourneyTask.Quota)
+		if !relayInfo.IsOrgRequest() {
+			model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, midjourneyTask.Quota)
+		}
 		model.UpdateChannelUsedQuota(billingChannelId, midjourneyTask.Quota)
 	}
 
@@ -723,4 +785,13 @@ func getMjRequestPath(path string) string {
 		requestURL = "/mj/" + urls[1]
 	}
 	return requestURL
+}
+
+// refundUnsettledOrgReservation cancels the hold of an organization request
+// that never reached settlement: a refused upstream call, a rejected prompt or
+// a failed insert. A settled reservation is left alone.
+func refundUnsettledOrgReservation(c *gin.Context, info *relaycommon.RelayInfo) {
+	if info.Billing != nil && info.Billing.NeedsRefund() {
+		info.Billing.Refund(c)
+	}
 }

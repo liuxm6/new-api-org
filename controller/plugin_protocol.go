@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
@@ -94,6 +95,32 @@ func defaultPluginProtocolBridgeDeps() pluginProtocolBridgeDeps {
 	}
 }
 
+// forOrgRequest rebinds the task-facing dependencies for a request made with an
+// organization key: tasks are read through the key's subject (the shared wallet
+// id is not an owner) and artifact URLs are tickets bound to that subject.
+// Personal requests keep the dependencies as configured.
+func (d pluginProtocolBridgeDeps) forOrgRequest(c *gin.Context) pluginProtocolBridgeDeps {
+	subject, ok := middleware.OrgSubjectFromContext(c)
+	if !ok {
+		return d
+	}
+	scope := model.TaskScopeForOrgSubject(subject)
+	d.loadTask = func(ctx context.Context, _ int, platform constant.TaskPlatform, taskID string) (*model.Task, bool, error) {
+		return model.GetTaskInScopeForObservation(ctx, scope, platform, taskID)
+	}
+	d.getByTaskId = func(_ int, taskID string) (*model.Task, bool, error) {
+		return model.GetTaskInScope(scope, taskID)
+	}
+	d.artifactContentURL = func(taskID, artifactKey string) (string, error) {
+		claims, claimsOK := service.OrgArtifactClaimsForSubject(subject, c.GetInt64(string(constant.ContextKeyOrgPolicyVersion)))
+		if !claimsOK {
+			return "", service.ErrOrgArtifactTicketInvalid
+		}
+		return service.BuildOrgTaskArtifactContentURL(claims, taskID, artifactKey)
+	}
+	return d
+}
+
 func (d pluginProtocolBridgeDeps) withDefaults() pluginProtocolBridgeDeps {
 	defaults := defaultPluginProtocolBridgeDeps()
 	if d.submit == nil {
@@ -164,7 +191,7 @@ func serveTaskPluginProtocol(
 	pinned pluginruntime.PinnedEndpoint,
 	deps pluginProtocolBridgeDeps,
 ) {
-	deps = deps.withDefaults()
+	deps = deps.withDefaults().forOrgRequest(c)
 	generation := uint64(0)
 	if pinned.Generation != nil {
 		generation = pinned.Generation.Number
@@ -942,7 +969,7 @@ func RetrieveTaskPluginResponse(c *gin.Context) {
 }
 
 func retrieveTaskPluginResponse(c *gin.Context, deps pluginProtocolBridgeDeps) {
-	deps = deps.withDefaults()
+	deps = deps.withDefaults().forOrgRequest(c)
 	responseID := strings.TrimSpace(c.Param("response_id"))
 	if !strings.HasPrefix(responseID, "resp_") {
 		writeTaskPluginResponseNotFound(c, responseID, "bad_prefix")

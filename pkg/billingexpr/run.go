@@ -135,16 +135,41 @@ func runProgram(prog *vm.Program, requestRules []RequestRuleTrace, usedVars map[
 			}
 			return strings.Contains(fmt.Sprint(source), substr)
 		},
-		"hour":    func(tz string) int { return timeInZone(tz).Hour() },
-		"minute":  func(tz string) int { return timeInZone(tz).Minute() },
-		"weekday": func(tz string) int { return int(timeInZone(tz).Weekday()) },
-		"month":   func(tz string) int { return int(timeInZone(tz).Month()) },
-		"day":     func(tz string) int { return timeInZone(tz).Day() },
-		"max":     math.Max,
-		"min":     math.Min,
-		"abs":     math.Abs,
-		"ceil":    math.Ceil,
-		"floor":   math.Floor,
+		"hour": func(tz string) int {
+			if v, ok := request.probes[probeKey("hour", tz)]; ok {
+				return v
+			}
+			return timeInZone(tz).Hour()
+		},
+		"minute": func(tz string) int {
+			if v, ok := request.probes[probeKey("minute", tz)]; ok {
+				return v
+			}
+			return timeInZone(tz).Minute()
+		},
+		"weekday": func(tz string) int {
+			if v, ok := request.probes[probeKey("weekday", tz)]; ok {
+				return v
+			}
+			return int(timeInZone(tz).Weekday())
+		},
+		"month": func(tz string) int {
+			if v, ok := request.probes[probeKey("month", tz)]; ok {
+				return v
+			}
+			return int(timeInZone(tz).Month())
+		},
+		"day": func(tz string) int {
+			if v, ok := request.probes[probeKey("day", tz)]; ok {
+				return v
+			}
+			return timeInZone(tz).Day()
+		},
+		"max":   math.Max,
+		"min":   math.Min,
+		"abs":   math.Abs,
+		"ceil":  math.Ceil,
+		"floor": math.Floor,
 	}
 
 	out, err := expr.Run(prog, env)

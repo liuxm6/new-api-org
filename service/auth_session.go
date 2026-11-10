@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -50,17 +51,40 @@ type AuthBundle struct {
 }
 
 func CreateLoginSession(userID int, loginMethod, ip, userAgent string) (*AuthBundle, error) {
-	return createLoginSession(userID, 0, loginMethod, ip, userAgent)
+	return createLoginSession(userID, 0, loginMethod, ip, userAgent, nil)
 }
 
 func CreateLoginSessionAtAuthVersion(userID int, expectedAuthVersion int64, loginMethod, ip, userAgent string) (*AuthBundle, error) {
 	if expectedAuthVersion <= 0 {
 		return nil, ErrLoginSessionInvalid
 	}
-	return createLoginSession(userID, expectedAuthVersion, loginMethod, ip, userAgent)
+	return createLoginSession(userID, expectedAuthVersion, loginMethod, ip, userAgent, nil)
 }
 
-func createLoginSession(userID int, expectedAuthVersion int64, loginMethod, ip, userAgent string) (*AuthBundle, error) {
+// OrgSessionScope restricts a session to one organization and the identity
+// provider that authenticated it.
+type OrgSessionScope struct {
+	OrgID      int
+	ProviderID int
+}
+
+// CreateOrgLoginSession issues a session limited to one organization. Its
+// scope is written with the row and part of the cached snapshot; refresh
+// rotation updates the same row, so no later step can widen it. A new
+// credential is issued for every organization sign-in (ASVS 5.0.0 7.2.4).
+func CreateOrgLoginSession(userID int, scope OrgSessionScope, ip, userAgent string) (*AuthBundle, error) {
+	if scope.OrgID <= 0 || scope.ProviderID <= 0 {
+		return nil, ErrLoginSessionInvalid
+	}
+	return createLoginSession(userID, 0, "org_sso", ip, userAgent, &scope)
+}
+
+// OrgSessionLiveness decides, for a refresh, whether an org-restricted session
+// still has the standing it was issued for. The organization package installs
+// it (service/org cannot be imported here); a nil checker fails closed.
+var OrgSessionLiveness func(userID, orgID, providerID int) bool
+
+func createLoginSession(userID int, expectedAuthVersion int64, loginMethod, ip, userAgent string, scope *OrgSessionScope) (*AuthBundle, error) {
 	user, err := model.GetUserCache(userID)
 	if err != nil {
 		return nil, err
@@ -89,6 +113,9 @@ func createLoginSession(userID int, expectedAuthVersion int64, loginMethod, ip, 
 	session, refreshSecret, err := newLoginSession(userID, user.AuthVersion, loginMethod, ip, userAgent)
 	if err != nil {
 		return nil, err
+	}
+	if scope != nil {
+		session.AuthScope, session.OrgID, session.ProviderID = types.AuthScopeOrg, scope.OrgID, scope.ProviderID
 	}
 	if err := model.CreateUserSession(session); err != nil {
 		return nil, err
@@ -248,6 +275,15 @@ func RefreshLoginSession(rawRefreshToken, expectedSID, ip, userAgent string) (*A
 	}
 	if session.Status != model.UserSessionStatusActive || session.RevokedAt != 0 || session.ExpiresAt <= time.Now().Unix() {
 		return nil, nil, ErrLoginSessionRevoked
+	}
+	// Refresh keeps the session row and so its scope. An org-restricted session
+	// also has to still be justified: a removed, suspended or deprovisioned
+	// person cannot mint new access tokens from an old refresh cookie.
+	if session.EffectiveAuthScope() == types.AuthScopeOrg {
+		if OrgSessionLiveness == nil || !OrgSessionLiveness(session.UserID, session.OrgID, session.ProviderID) {
+			_, _ = model.RevokeUserSession(session.UserID, session.SID, "org_standing_lost")
+			return nil, nil, ErrLoginSessionRevoked
+		}
 	}
 	userCache, err := model.GetUserCache(session.UserID)
 	if err != nil {

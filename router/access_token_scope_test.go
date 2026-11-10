@@ -51,6 +51,24 @@ var accessTokenExemptRoutes = []string{
 	"GET /api/oauth/telegram/login",
 	"GET /api/oauth/telegram/bind/:flow_token",
 
+	// Organization sign-in (the IdP ceremony authenticates it) and the personal
+	// management credential tree (ManagementAuth authenticates it). Neither
+	// accepts a dashboard session or a personal access token.
+	"POST /api/org-sso/:org/begin",
+	"POST /api/org-sso/:org/callback",
+	"GET /api/mgmt/orgs/:org/members",
+	"PATCH /api/mgmt/orgs/:org/members/:mid",
+	"DELETE /api/mgmt/orgs/:org/members/:mid",
+	"GET /api/mgmt/orgs/:org/invites",
+	"POST /api/mgmt/orgs/:org/invites",
+	"DELETE /api/mgmt/orgs/:org/invites/:iid",
+	"GET /api/mgmt/orgs/:org/workspaces",
+	"GET /api/mgmt/orgs/:org/workspaces/:ws/keys",
+	"POST /api/mgmt/orgs/:org/workspaces/:ws/keys",
+	"PATCH /api/mgmt/orgs/:org/workspaces/:ws/keys/:kid",
+	"DELETE /api/mgmt/orgs/:org/workspaces/:ws/keys/:kid",
+	"POST /api/mgmt/orgs/:org/workspaces/:ws/keys/:kid/rotate",
+
 	// Browser session cookie endpoints.
 	"POST /api/user/auth/refresh",
 	"POST /api/user/auth/logout",

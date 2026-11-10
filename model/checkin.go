@@ -57,6 +57,12 @@ func UserCheckin(userId int) (*Checkin, error) {
 		return nil, common.NewMessage("Check-in feature is not enabled")
 	}
 
+	if billing, err := isBillingAccountByID(DB, userId); err != nil {
+		return nil, err
+	} else if billing {
+		return nil, ErrBillingAccount
+	}
+
 	// 检查今天是否已签到
 	hasChecked, err := HasCheckedInToday(userId)
 	if err != nil {

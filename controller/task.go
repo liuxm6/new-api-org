@@ -37,7 +37,7 @@ var (
 )
 
 func GetTask(c *gin.Context) {
-	task, exists, err := model.GetByTaskId(c.GetInt("id"), c.Param("key"))
+	task, exists, err := model.GetTaskInScope(model.TaskScopeFromContext(c, c.GetInt("id")), c.Param("key"))
 	if err != nil {
 		videoProxyError(c, http.StatusInternalServerError, "server_error", "Failed to query task")
 		return
@@ -66,7 +66,7 @@ func GetTask(c *gin.Context) {
 }
 
 func GetTaskArtifacts(c *gin.Context) {
-	task, exists, err := model.GetByTaskId(c.GetInt("id"), c.Param("key"))
+	task, exists, err := model.GetTaskInScope(model.TaskScopeFromContext(c, c.GetInt("id")), c.Param("key"))
 	if err != nil {
 		writeTaskArtifactError(c, http.StatusInternalServerError, "artifact_internal_error", "Failed to query task")
 		return
@@ -75,7 +75,7 @@ func GetTaskArtifacts(c *gin.Context) {
 		writeTaskArtifactError(c, http.StatusNotFound, "artifact_not_found", "Task or artifact not found")
 		return
 	}
-	writeTaskArtifacts(c, task, false)
+	writeTaskArtifacts(c, task, false, middleware.TaskArtifactURLBuilder(c, task))
 }
 
 func GetDashboardTaskArtifacts(c *gin.Context) {
@@ -88,10 +88,13 @@ func GetDashboardTaskArtifacts(c *gin.Context) {
 		writeTaskArtifactError(c, http.StatusNotFound, "artifact_not_found", "Task or artifact not found")
 		return
 	}
-	writeTaskArtifacts(c, task, true)
+	writeTaskArtifacts(c, task, true, service.BuildTaskArtifactContentURL)
 }
 
-func writeTaskArtifacts(c *gin.Context, task *model.Task, dashboard bool) {
+// writeTaskArtifacts lists a task's artifacts with a content URL for each.
+// buildURL decides what kind of URL a reader gets: a permanent capability for a
+// personal task, a ticket bound to the reader for an organization task.
+func writeTaskArtifacts(c *gin.Context, task *model.Task, dashboard bool, buildURL func(taskID, artifactKey string) (string, error)) {
 	c.Header("Cache-Control", "private, no-store")
 	artifacts, err := projectTaskArtifacts(task)
 	if err != nil {
@@ -100,7 +103,7 @@ func writeTaskArtifacts(c *gin.Context, task *model.Task, dashboard bool) {
 	}
 	items := make([]taskArtifactResponse, 0, len(artifacts))
 	for _, artifact := range artifacts {
-		contentURL, buildErr := service.BuildTaskArtifactContentURL(task.TaskID, artifact.Key)
+		contentURL, buildErr := buildURL(task.TaskID, artifact.Key)
 		if buildErr != nil {
 			writeTaskArtifactError(c, http.StatusInternalServerError, "artifact_url_error", "Failed to build artifact content URL")
 			return
@@ -113,11 +116,13 @@ func writeTaskArtifacts(c *gin.Context, task *model.Task, dashboard bool) {
 		})
 	}
 	response := gin.H{"task_id": task.TaskID, "artifacts": items}
-	if dashboard && task.Status == model.TaskStatusSuccess && task.Platform == constant.TaskPlatformSuno {
+	// The legacy clip preview carries the vendor's own audio URLs, which an
+	// organization task must never expose outside the gateway.
+	if dashboard && task.OrgId == 0 && task.Status == model.TaskStatusSuccess && task.Platform == constant.TaskPlatformSuno {
 		response["legacy_audio_clips"] = legacySunoAudioClips(task.Data)
 	}
 	if legacyVideoAvailable(task) {
-		legacyContentURL, buildErr := service.BuildTaskArtifactContentURL(task.TaskID, "video")
+		legacyContentURL, buildErr := buildURL(task.TaskID, "video")
 		if buildErr != nil {
 			writeTaskArtifactError(c, http.StatusInternalServerError, "artifact_url_error", "Failed to build artifact content URL")
 			return
@@ -270,6 +275,11 @@ func legacyVideoAvailable(task *model.Task) bool {
 }
 
 func getTaskForArtifactRequest(c *gin.Context, taskID string) (*model.Task, bool, error) {
+	// A v2 organization ticket was rechecked against the database by the
+	// middleware; the task is read through the scope that recheck resolved.
+	if scope, ok := model.OrgTicketScopeFromContext(c); ok {
+		return model.GetTaskInScope(scope, taskID)
+	}
 	if middleware.IsTaskArtifactAccess(c) {
 		task, exists, err := model.GetUniqueByOnlyTaskId(taskID)
 		if err != nil || !exists || task == nil {
@@ -284,7 +294,7 @@ func getTaskForArtifactRequest(c *gin.Context, taskID string) (*model.Task, bool
 	if c.GetInt("token_id") == 0 && c.GetInt("role") >= common.RoleAdminUser {
 		return model.GetByOnlyTaskId(taskID)
 	}
-	return model.GetByTaskId(c.GetInt("id"), taskID)
+	return model.GetTaskInScope(model.TaskScopeFromContext(c, c.GetInt("id")), taskID)
 }
 
 func writeTaskArtifactProjectionError(c *gin.Context, err error) {

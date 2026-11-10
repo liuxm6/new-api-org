@@ -18,6 +18,7 @@ const (
 	MsgAuthTokenGroupForbidden    = "auth.token_group_forbidden"
 	MsgAuthTokenGroupDeprecated   = "auth.token_group_deprecated"
 	MsgAuthChannelSelectForbidden = "auth.channel_select_forbidden"
+	MsgAuthOrgKeyForbidden        = "auth.org_key_forbidden"
 
 	MsgRateLimitReached      = "rate_limit.reached"
 	MsgRateLimitTotalReached = "rate_limit.total_reached"
@@ -65,6 +66,11 @@ const (
 	MsgEmailPasswordResetLink         = "email.password_reset.link"
 	MsgEmailPasswordResetLinkFallback = "email.password_reset.link_fallback"
 	MsgEmailPasswordResetValidity     = "email.password_reset.validity"
+
+	MsgEmailInviteSubject = "email.org_invite.subject"
+	MsgEmailInviteIntro   = "email.org_invite.intro"
+	MsgEmailInviteLink    = "email.org_invite.link"
+	MsgEmailInviteExpiry  = "email.org_invite.expiry"
 
 	MsgEmailBindingSubject     = "email.binding.subject"
 	MsgEmailBindingNewIntro    = "email.binding.new_intro"

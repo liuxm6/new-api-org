@@ -40,7 +40,12 @@ func jsonScanBytes(value any) []byte {
 	}
 }
 
+// InitColumnNames recomputes the dialect-specific column names. InitDB calls it;
+// tests that open their own database call it after switching the database type.
+func InitColumnNames() { initCol() }
+
 func initCol() {
+	resetBillingKindCache()
 	// init common column names
 	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		commonGroupCol = `"group"`
@@ -380,6 +385,9 @@ func migrateDB() error {
 	if err != nil {
 		return err
 	}
+	if err := migrateOrgTables(); err != nil {
+		return err
+	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err
 	}
@@ -415,6 +423,12 @@ func migrateClickHouseLogDB() error {
 	ttlDays := clickHouseLogTTLDays()
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
+	}
+	// Tables created before organizations lack the attribution columns.
+	for _, column := range []string{"org_id", "workspace_id", "actor_user_id"} {
+		if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS " + column + " Int32 DEFAULT 0").Error; err != nil {
+			return err
+		}
 	}
 	return syncClickHouseLogTTL(ttlDays)
 }
@@ -464,7 +478,10 @@ CREATE TABLE IF NOT EXISTS logs (
 	ip String DEFAULT '',
 	request_id String DEFAULT '',
 	upstream_request_id String DEFAULT '',
-	other String DEFAULT ''
+	other String DEFAULT '',
+	org_id Int32 DEFAULT 0,
+	workspace_id Int32 DEFAULT 0,
+	actor_user_id Int32 DEFAULT 0
 )
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(toDateTime(created_at))

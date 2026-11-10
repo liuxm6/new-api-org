@@ -81,6 +81,16 @@ type TokenCountMeta struct {
 }
 
 type RelayInfo struct {
+	// OrgSubject is the trusted organization subject written by TokenAuth.
+	// OrgSubject.OrgID == 0 means a personal or legacy request. It is never read
+	// from a request body or header.
+	OrgSubject hosttypes.OrgSubject
+	// OrgStreamByteBudget caps the upstream stream bytes forwarded for an
+	// organization request; 0 means no cap. See service.orgStreamByteBudget.
+	OrgStreamByteBudget int64
+	// OrgOutputCap is the output limit the organization reservation assumed; 0
+	// means none. Every output field of the final request body is cut to it.
+	OrgOutputCap      int64
 	TokenId           int
 	TokenKey          string
 	TokenGroup        string
@@ -618,6 +628,7 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 		Request:         request,
 		ReasoningEffort: reasoningEffort,
 
+		OrgSubject: orgSubjectFromContext(c),
 		RequestId:  reqId,
 		UserId:     common.GetContextKeyInt(c, constant.ContextKeyUserId),
 		UsingGroup: common.GetContextKeyString(c, constant.ContextKeyUsingGroup),
@@ -1306,4 +1317,20 @@ func RemoveGeminiDisabledFields(jsonData []byte) ([]byte, error) {
 		}
 	}
 	return doc.Bytes(), nil
+}
+
+// orgSubjectFromContext returns the organization subject stored by TokenAuth, or
+// the zero value for personal requests.
+func orgSubjectFromContext(c *gin.Context) hosttypes.OrgSubject {
+	value, exists := c.Get(string(constant.ContextKeyOrgSubject))
+	if !exists {
+		return hosttypes.OrgSubject{}
+	}
+	subject, _ := value.(hosttypes.OrgSubject)
+	return subject
+}
+
+// IsOrgRequest reports whether the request is billed to an organization.
+func (info *RelayInfo) IsOrgRequest() bool {
+	return info != nil && info.OrgSubject.OrgID > 0
 }

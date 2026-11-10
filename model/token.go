@@ -31,9 +31,16 @@ type Token struct {
 	AutoGroups         string         `json:"-" gorm:"type:text"`
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 	// 允许用此令牌查询所属用户的额度；新建令牌默认开启，已有令牌升级后保持关闭
-	AllowUserQuotaQuery bool   `json:"allow_user_quota_query"`
-	CacheExpiresAt      int64  `json:"-" gorm:"-"`
-	CacheMAC            string `json:"-" gorm:"-"`
+	AllowUserQuotaQuery bool `json:"allow_user_quota_query"`
+	// Organization ownership. Written only by the workspace service; the generic
+	// token API must never read these from a request body.
+	OrgId             int    `json:"-" gorm:"default:0;index"`
+	WorkspaceId       int    `json:"-" gorm:"default:0;index"`
+	CreatedBy         int    `json:"-" gorm:"default:0"`
+	OwnerType         string `json:"-" gorm:"type:varchar(16);default:''"`
+	AccessPrincipalId string `json:"-" gorm:"type:varchar(64);default:'';index"`
+	CacheExpiresAt    int64  `json:"-" gorm:"-"`
+	CacheMAC          string `json:"-" gorm:"-"`
 }
 
 func (token *Token) GetAutoGroups() ([]string, error) {
@@ -110,7 +117,7 @@ func (token *Token) GetIpLimits() []string {
 func GetAllUserTokens(userId int, startIdx int, num int) ([]*Token, error) {
 	var tokens []*Token
 	var err error
-	err = DB.Where("user_id = ?", userId).Order("id desc").Limit(num).Offset(startIdx).Find(&tokens).Error
+	err = DB.Where("user_id = ? AND org_id = 0", userId).Order("id desc").Limit(num).Offset(startIdx).Find(&tokens).Error
 	return tokens, err
 }
 
@@ -187,7 +194,7 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 		}
 	}
 
-	baseQuery := DB.Model(&Token{}).Where("user_id = ?", userId)
+	baseQuery := DB.Model(&Token{}).Where("user_id = ? AND org_id = 0", userId)
 
 	// 非空才加 LIKE 条件，空则跳过（不过滤该字段）
 	if keyword != "" {
@@ -267,7 +274,7 @@ func GetTokenByIds(id int, userId int) (*Token, error) {
 	}
 	token := Token{Id: id, UserId: userId}
 	var err error = nil
-	err = DB.First(&token, "id = ? and user_id = ?", id, userId).Error
+	err = DB.First(&token, "id = ? and user_id = ? and org_id = 0", id, userId).Error
 	return &token, err
 }
 
@@ -372,7 +379,7 @@ func DeleteTokenById(id int, userId int) (err error) {
 		return common.NewMessage("Token ID or user ID is empty")
 	}
 	token := Token{Id: id, UserId: userId}
-	err = DB.Where(token).First(&token).Error
+	err = DB.Where(token).Where("org_id = 0").First(&token).Error
 	if err != nil {
 		return err
 	}
@@ -442,7 +449,7 @@ func decreaseTokenQuota(id int, quota int) (err error) {
 // CountUserTokens returns total number of tokens for the given user, used for pagination
 func CountUserTokens(userId int) (int64, error) {
 	var total int64
-	err := DB.Model(&Token{}).Where("user_id = ?", userId).Count(&total).Error
+	err := DB.Model(&Token{}).Where("user_id = ? AND org_id = 0", userId).Count(&total).Error
 	return total, err
 }
 
@@ -455,7 +462,7 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 	tx := DB.Begin()
 
 	var tokens []Token
-	if err := tx.Where("user_id = ? AND id IN (?)", userId, ids).Find(&tokens).Error; err != nil {
+	if err := tx.Where("user_id = ? AND org_id = 0 AND id IN (?)", userId, ids).Find(&tokens).Error; err != nil {
 		tx.Rollback()
 		return 0, err
 	}
@@ -463,7 +470,7 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 		common.SysLog(common.LogText("failed to invalidate token cache before batch delete: %s", err.Error()))
 	}
 
-	if err := tx.Where("user_id = ? AND id IN (?)", userId, ids).Delete(&Token{}).Error; err != nil {
+	if err := tx.Where("user_id = ? AND org_id = 0 AND id IN (?)", userId, ids).Delete(&Token{}).Error; err != nil {
 		tx.Rollback()
 		return 0, err
 	}
@@ -478,7 +485,7 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 func GetTokenKeysByIds(ids []int, userId int) ([]Token, error) {
 	var tokens []Token
 	err := DB.Select("id", commonKeyCol).
-		Where("user_id = ? AND id IN (?)", userId, ids).
+		Where("user_id = ? AND org_id = 0 AND id IN (?)", userId, ids).
 		Find(&tokens).Error
 	return tokens, err
 }

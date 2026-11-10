@@ -40,6 +40,9 @@ const (
 	FilterTaskPluginEndpoint ChannelFilterKind = "task_plugin_endpoint"
 	FilterTaskPluginIdentity ChannelFilterKind = "task_plugin_identity"
 	FilterResponsesWebSocket ChannelFilterKind = "responses_websocket"
+	// FilterOrgProvider enforces an organization's provider guardrails. The
+	// provider of a channel is its platform-managed tag.
+	FilterOrgProvider ChannelFilterKind = "org_provider"
 )
 
 type ChannelFilter struct {
@@ -51,6 +54,12 @@ type ChannelFilter struct {
 	// TaskPluginRelayOnly excludes endpoint candidates after an ordinary relay
 	// channel wins selection, so retries keep using the same protocol handler.
 	TaskPluginRelayOnly bool
+
+	// OrgProviderAllowSets holds one allow list per guardrail layer; a channel
+	// must appear in every set (intersection). A present but empty set denies
+	// every channel. OrgProviderDeny is the union of all deny lists and wins.
+	OrgProviderAllowSets [][]string
+	OrgProviderDeny      []string
 }
 
 type ChannelConstraints struct {

@@ -19,6 +19,10 @@ const (
 	StreamEndReasonEOF         StreamEndReason = "eof"
 	StreamEndReasonPanic       StreamEndReason = "panic"
 	StreamEndReasonPingFail    StreamEndReason = "ping_fail"
+	// StreamEndReasonBudget means the gateway stopped reading an organization's
+	// upstream stream at its byte budget. The client still gets the adaptor's
+	// normal ending, so it counts as a normal end.
+	StreamEndReasonBudget StreamEndReason = "budget"
 )
 
 // ResponseOutcome is the protocol-level result of one response, independent of
@@ -212,7 +216,8 @@ func (s *StreamStatus) IsNormalEnd() bool {
 	}
 	return s.EndReason == StreamEndReasonDone ||
 		s.EndReason == StreamEndReasonEOF ||
-		s.EndReason == StreamEndReasonHandlerStop
+		s.EndReason == StreamEndReasonHandlerStop ||
+		s.EndReason == StreamEndReasonBudget
 }
 
 func (s *StreamStatus) Summary() string {

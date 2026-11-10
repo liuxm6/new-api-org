@@ -47,7 +47,13 @@ func PrepareMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.
 	if quota < 0 {
 		return false, errors.New("quota cannot be negative")
 	}
-	if relayInfo.BillingSource == BillingSourceSubscription {
+	if relayInfo.IsOrgRequest() {
+		operationID := OrgBillingOperationID(relayInfo)
+		if operationID == "" {
+			return false, errOrgLegacyBilling("PrepareMidjourneyTaskBilling", relayInfo)
+		}
+		task.BillingOperationId = operationID
+	} else if relayInfo.BillingSource == BillingSourceSubscription {
 		return false, errors.New("legacy Midjourney billing does not support subscriptions")
 	}
 
@@ -69,6 +75,9 @@ func SettleMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.M
 	}
 	if task == nil || task.Id == 0 {
 		return false, errors.New("Midjourney task must be persisted before billing")
+	}
+	if relayInfo.IsOrgRequest() {
+		return settleOrgMidjourneyBilling(relayInfo, task)
 	}
 
 	result, billingErr := postConsumeQuotaWithResult(relayInfo, task.Quota, 0, true)
@@ -98,6 +107,9 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 	if quota == 0 {
 		return true
 	}
+	if task.OrgId > 0 {
+		return refundOrgMidjourneyQuota(ctx, task, reason)
+	}
 
 	if err := model.IncreaseUserQuota(task.UserId, quota, false); err != nil {
 		logger.LogWarn(ctx, common.LogText("failed to refund Midjourney user quota, task %s: %s", task.MjId, err.Error()))
@@ -120,13 +132,16 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 	other.SetPublic("task_id", task.MjId)
 	other.SetPublic("reason", reason)
 	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
-		UserId:    task.UserId,
-		LogType:   model.LogTypeRefund,
-		ChannelId: billingChannelId,
-		ModelName: CovertMjpActionToModelName(task.Action),
-		Quota:     quota,
-		TokenId:   task.TokenId,
-		Other:     other,
+		OrgId:       task.OrgId,
+		WorkspaceId: task.WorkspaceId,
+		ActorUserId: task.ActorUserId,
+		UserId:      task.UserId,
+		LogType:     model.LogTypeRefund,
+		ChannelId:   billingChannelId,
+		ModelName:   CovertMjpActionToModelName(task.Action),
+		Quota:       quota,
+		TokenId:     task.TokenId,
+		Other:       other,
 	})
 
 	task.Quota = 0

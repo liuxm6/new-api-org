@@ -9,6 +9,9 @@ import (
 )
 
 func GetSubscription(c *gin.Context) {
+	if orgKeyBilling(c, false) {
+		return
+	}
 	var remainQuota int
 	var usedQuota int
 	var err error
@@ -69,6 +72,9 @@ func GetSubscription(c *gin.Context) {
 }
 
 func GetUsage(c *gin.Context) {
+	if orgKeyBilling(c, true) {
+		return
+	}
 	var quota int
 	var err error
 	var token *model.Token

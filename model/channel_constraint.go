@@ -2,6 +2,7 @@ package model
 
 import (
 	"slices"
+	"strings"
 
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
@@ -12,6 +13,7 @@ var filterEvalOrder = []dto.ChannelFilterKind{
 	dto.FilterTaskPluginEndpoint,
 	dto.FilterTaskPluginIdentity,
 	dto.FilterResponsesWebSocket,
+	dto.FilterOrgProvider,
 }
 
 // ChannelSatisfiesFilters reports whether ch passes every filter.
@@ -122,6 +124,8 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 		// group, priority, weight, affinity, and pin rules. Unrelated type-61
 		// plugins cannot execute this endpoint.
 		return ch.Type != constant.ChannelTypeTaskPlugin || pluginChannel
+	case dto.FilterOrgProvider:
+		return channelSatisfiesOrgProvider(ch, filter)
 	case dto.FilterResponsesWebSocket:
 		if !ch.GetSetting().ResponsesWebSocketEnabled {
 			return false
@@ -140,4 +144,30 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 	default:
 		return true
 	}
+}
+
+// channelProviderTag is the provider identity of a channel: its platform-managed
+// tag, lower-cased. A channel without a tag has no provable provider.
+func channelProviderTag(ch *Channel) string {
+	if ch == nil || ch.Tag == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(*ch.Tag))
+}
+
+// channelSatisfiesOrgProvider applies organization provider guardrails. The
+// client never states a provider; only the channel's own tag counts. When any
+// allow list exists, a channel whose provider cannot be proven is refused. A
+// deny list refuses the channels it names.
+func channelSatisfiesOrgProvider(ch *Channel, filter dto.ChannelFilter) bool {
+	provider := channelProviderTag(ch)
+	if provider != "" && slices.Contains(filter.OrgProviderDeny, provider) {
+		return false
+	}
+	for _, allowed := range filter.OrgProviderAllowSets {
+		if provider == "" || !slices.Contains(allowed, provider) {
+			return false
+		}
+	}
+	return true
 }
